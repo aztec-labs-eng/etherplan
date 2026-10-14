@@ -378,3 +378,49 @@ test('saved pinned proof fails when child runtime changes after deployment', asy
     await ws.close();
   }
 });
+
+test('rebuilt artifact with unchanged bytecode keeps a pinned proof verified', async () => {
+  const ws = await fixture();
+  try {
+    ws.spec.contracts[0].creationProofMode = 'pinned-runtime';
+    ws.spec.contracts[0].codeHash = ws.parentHash;
+    ws.spec.contracts[0].createdCode = [
+      { getter: 'implementation', createNonce: 1, codeHash: ws.childHash },
+    ];
+    await ws.apply(await createPlan(ws.input));
+    const state = await readState(ws.stateFile);
+    const records = await readLocalJournal(ws.journalFile);
+    const rebuiltFields = { ...fields, buildIdentity: { sourceHash: `0x${'44'.repeat(32)}` } };
+    const rebuilt = { ...rebuiltFields, artifactHash: hashJson(rebuiltFields) };
+    assert.notEqual(rebuilt.artifactHash, artifact.artifactHash);
+    const artifacts = new Map([['parent', rebuilt]]);
+    const replanned = await createPlan({ ...ws.input, artifacts, state, journalRecords: records });
+    const parent = replanned.resources[0];
+    assert.equal(parent.action, 'reuse');
+    assert.equal(parent.observation.stateComparison.artifactDrift.accepted, true);
+    assert.equal(parent.observation.creationProof.method, 'pinned-runtime');
+    const result = await applyPlan({
+      plan: replanned,
+      spec: ws.spec,
+      artifacts,
+      client: ws.chain.client,
+      signers: { deployer: [deployerA] },
+      stateFile: ws.stateFile,
+      journalFile: ws.journalFile,
+      pollIntervalMs: 20,
+    });
+    assert.equal(result.transactionsSigned, 0);
+    const rebaselined = await readState(ws.stateFile);
+    assert.equal(rebaselined.resources['contract:parent'].artifactHash, rebuilt.artifactHash);
+    const again = await createPlan({
+      ...ws.input,
+      artifacts,
+      state: rebaselined,
+      journalRecords: await readLocalJournal(ws.journalFile),
+    });
+    assert.equal(again.resources[0].action, 'reuse');
+    assert.equal(again.resources[0].observation.stateComparison.artifactDrift, undefined);
+  } finally {
+    await ws.close();
+  }
+});
