@@ -11,7 +11,10 @@ import type { JournalRecord } from '../execution/types.ts';
 const same = (left: string | null | undefined, right: string | null | undefined): boolean =>
   left?.toLowerCase() === right?.toLowerCase();
 
-/** Hash only values that existed in the plan before its transaction was signed. */
+/**
+ * Hash only values that existed in the plan before its transaction was signed. The artifact hash is left out: it
+ * records build provenance, which a rebuild can change without changing the initcode or pinned runtimes.
+ */
 export function pinnedCommitment(planHash: Hash, resource: PreparedContract): Hash {
   if (
     resource.creationProofMode !== 'pinned-runtime' ||
@@ -26,7 +29,6 @@ export function pinnedCommitment(planHash: Hash, resource: PreparedContract): Ha
     planHash,
     id: resource.id,
     address: resource.address,
-    artifactHash: resource.artifactHash,
     initcodeHash: resource.initcodeHash,
     inputsHash: resource.inputsHash,
     salt: resource.salt,

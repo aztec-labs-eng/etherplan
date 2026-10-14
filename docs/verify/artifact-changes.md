@@ -14,6 +14,8 @@ A plan can reuse an existing CREATE2 deployment after a rebuild when all of thes
 
 The plan reports the old and new hashes in `observation.stateComparison.artifactDrift` and pins the new artifact hash. Apply sends no transaction for this drift. Under its lock, it rechecks the state record and live code; a change stops with `stale-state` or `drift`. It then records the new artifact and appends the previous artifact, source, proof, and code hashes to `artifactRevisions`. Transaction and deployment provenance stay attached to the existing deployment.
 
+A [pinned-runtime](../recovery/stateful-constructors.md) deployment is reused the same way. Its pre-sign commitment binds the initcode, inputs, address, salt, factory, and runtime pins, but not the artifact hash, so a rebuild with unchanged bytecode keeps the proof valid. A commitment signed by v0.1.2-beta or earlier includes the artifact hash; after such a rebuild, its contract is `unverified`.
+
 If verification fails, the plan marks the contract `conflict` and puts the reasons in `artifactDrift.reasons`. A change to both address and initcode or inputs is a replacement and starts a new revision list. Changing only one is a conflict. A salt change with unchanged initcode, inputs, and generation is also a conflict; `observation.stateComparison.saltChange` explains it, including a rotated mixer or new `derive` label. To deliberately deploy the same contract at a new address, raise its [generation](../project/salts.md#generations).
 
 ## Imported contracts
