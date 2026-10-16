@@ -18,6 +18,10 @@ A [pinned-runtime](../recovery/stateful-constructors.md) deployment is reused th
 
 If verification fails, the plan marks the contract `conflict` and puts the reasons in `artifactDrift.reasons`. A change to both address and initcode or inputs is a replacement and starts a new revision list. Changing only one is a conflict. A salt change with unchanged initcode, inputs, and generation is also a conflict; `observation.stateComparison.saltChange` explains it, including a rotated mixer or new `derive` label. To deliberately deploy the same contract at a new address, raise its [generation](../project/salts.md#generations).
 
+## Adopted contracts
+
+A contract that the spec adopts by `address` is reused the same way after a rebuild, when the address and constructor inputs match recorded state, the live code hash equals the saved code hash, and the new artifact verifies the live contract. Each plan verifies an adopted contract again, so no import proof is involved. This applies to a record that plan and apply observed; a record without provenance is treated as an import.
+
 ## Imported contracts
 
 An imported contract is not rebaselined automatically. After rebuilding its artifact, run `etherplan import --id contract:name --rebaseline`. The saved address, inputs, and code hash must match, and the new artifact must verify the live contract. Etherplan reuses the recorded creation transaction as proof unless `--creation-tx` supplies another. It keeps import provenance and appends an artifact revision. Without `--rebaseline`, import rejects a changed artifact.

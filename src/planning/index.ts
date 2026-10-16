@@ -150,20 +150,29 @@ function lower(value: string | null | undefined): string | null {
   return typeof value === 'string' ? value.toLowerCase() : (value ?? null);
 }
 
-// A rebuilt artifact for an unchanged CREATE2 deployment is reused only when the saved and live code agree and the new
-// artifact verifies the live contract. prepareResources derives the address from the current factory, salt, and initcode.
+// A rebuilt artifact for an unchanged deployment is reused only when the saved and live code agree and the new artifact
+// verifies the live contract. For a CREATE2 deployment, prepareResources derives the address from the current factory,
+// salt, and initcode. A contract that the spec adopts by address has no initcode; each plan verifies it again, so it
+// takes the same path. An explicit import keeps its import proof, so it needs an explicit rebaseline.
+// Only an observed record counts as adopted: a record without provenance may be an import from an older version.
 function artifactDrift(
   resource: PreparedContract,
   record: ContractStateResource,
   verification: VerificationResult,
 ): ArtifactDrift {
   const reasons: string[] = [];
-  if (resource.initcodeHash === undefined || record.initcodeHash === null) {
-    reasons.push(
-      `An imported contract needs an explicit rebaseline: etherplan import --id ${resource.id} --rebaseline.`,
-    );
-  } else if (lower(record.salt) !== lower(resource.salt)) {
-    reasons.push('The saved salt differs from the spec salt.');
+  const adopted =
+    resource.initcodeHash === undefined &&
+    record.initcodeHash === null &&
+    record.provenance?.kind === 'observed';
+  if (!adopted) {
+    if (resource.initcodeHash === undefined || record.initcodeHash === null) {
+      reasons.push(
+        `An imported contract needs an explicit rebaseline: etherplan import --id ${resource.id} --rebaseline.`,
+      );
+    } else if (lower(record.salt) !== lower(resource.salt)) {
+      reasons.push('The saved salt differs from the spec salt.');
+    }
   }
   if (!record.codeHash) reasons.push('State has no code hash for this deployment.');
   else if (lower(record.codeHash) !== lower(verification.codeHash))
