@@ -192,6 +192,14 @@ async function importedState(client) {
   });
 }
 
+// A contract that the spec adopts by address: plan and apply record it as observed, with no transaction.
+async function adoptedState(client) {
+  const resource = prepared(importSpec(), original);
+  const verification = await verifyResource(resource, client);
+  assert.equal(verification.status, 'verified', JSON.stringify(verification));
+  return recordResource({ resource, verification, state: null, chain: chainIdentity });
+}
+
 async function planVault({ spec = vaultSpec(), artifact = rebuilt, client, state }) {
   return (await createPlan({ spec, artifacts: new Map([['vault', artifact]]), client, state }))
     .resources[0];
@@ -253,6 +261,56 @@ test('an artifact-only rebuild of an unchanged CREATE2 deployment is reused, wit
   const unchanged = await planVault({ artifact: original, client, state });
   assert.equal(unchanged.action, 'reuse');
   assert.equal(unchanged.observation.stateComparison.artifactDrift, undefined);
+});
+
+test('an artifact-only rebuild of a contract adopted by address is reused, with its drift in the plan', async () => {
+  const client = mockChain();
+  const state = await adoptedState(client);
+  const record = state.resources['contract:vault'];
+  assert.deepEqual([record.provenance, record.initcodeHash], [{ kind: 'observed' }, null]);
+  const vault = await planVault({ spec: importSpec(), client, state });
+  assert.equal(vault.action, 'reuse');
+  assert.equal(vault.observation.status, 'verified');
+  assert.equal(vault.artifactHash, rebuilt.artifactHash);
+  const { artifactDrift } = vault.observation.stateComparison;
+  assert.equal(artifactDrift.accepted, true, artifactDrift.reasons.join(' '));
+  assert.deepEqual(artifactDrift.baseline, {
+    address: vaultAddress,
+    initcodeHash: null,
+    inputsHash: record.inputsHash,
+    salt: null,
+    codeHash: keccak256(RUNTIME),
+  });
+
+  // The live checks still apply: changed live code or a failed check blocks the drift.
+  const moved = structuredClone(state);
+  moved.resources['contract:vault'].codeHash = `0x${'77'.repeat(32)}`;
+  const blocked = await planVault({ spec: importSpec(), client, state: moved });
+  assert.equal(blocked.action, 'conflict');
+  assert.match(
+    blocked.observation.stateComparison.artifactDrift.reasons.join(' '),
+    /Live code hash 0x[0-9a-f]{64} differs from the saved code hash/,
+  );
+  const failing = await planVault({
+    spec: importSpec({ checks: { value: '2' } }),
+    client,
+    state,
+  });
+  assert.equal(failing.action, 'conflict');
+  assert.match(
+    failing.observation.stateComparison.artifactDrift.reasons.join(' '),
+    /leaves the live contract conflict/,
+  );
+
+  // A record without provenance may come from an older import, so it keeps the explicit rebaseline.
+  const unknown = structuredClone(state);
+  delete unknown.resources['contract:vault'].provenance;
+  const legacy = await planVault({ spec: importSpec(), client, state: unknown });
+  assert.equal(legacy.action, 'conflict');
+  assert.match(
+    legacy.observation.stateComparison.artifactDrift.reasons.join(' '),
+    /etherplan import --id contract:vault --rebaseline/,
+  );
 });
 
 test('a saved deployment does not drift when only top-level ABI order changes', async () => {
