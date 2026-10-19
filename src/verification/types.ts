@@ -30,6 +30,7 @@ export type ProofMethod =
   | 'getter'
   | 'artifact-runtime'
   | 'masked-runtime'
+  | 'metadata-stripped-runtime'
   | 'cbor-metadata'
   | 'expected-code-hash'
   | 'create-transaction'
@@ -182,6 +183,8 @@ export interface VerificationEvidence {
   liveSkeletonHash: Hash;
   immutables: ImmutableEvidence[];
   difference?: RuntimeDifference;
+  /** The CBOR metadata tails a contract with `ignoreMetadata` left out of the runtime comparison. */
+  ignoredMetadata?: { expected: Hex; live: Hex };
   creation?: CreationEvidence;
   simulation?: SimulationEvidence;
 }

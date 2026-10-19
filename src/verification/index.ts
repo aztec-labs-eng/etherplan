@@ -8,6 +8,7 @@ import {
   linkBytecode,
   linkedLibraries,
 } from './bytecode.ts';
+import { decodeMetadataTail } from './metadata.ts';
 import { replayProviderFailure, simulateCreate2 } from './simulate.ts';
 import { abiArguments, normalizeOutputs, safeError, sameJson } from './values.ts';
 import { abiFunction } from '../validation/index.ts';
@@ -400,6 +401,25 @@ function isDeployable(resource: PreparedContract): resource is DeployableContrac
   return Boolean(resource.salt && resource.factory && resource.initcode && resource.initcodeHash);
 }
 
+/**
+ * Both runtimes without their CBOR metadata tails, for a contract with `ignoreMetadata`. Null when either runtime has
+ * no tail to strip; the comparison then covers every byte.
+ */
+function stripMetadataTails(
+  expected: Hex,
+  live: Hex,
+): { expected: Hex; live: Hex; expectedTail: Hex; liveTail: Hex } | null {
+  const expectedTail = decodeMetadataTail(expected);
+  const liveTail = decodeMetadataTail(live);
+  if (!expectedTail || !liveTail) return null;
+  return {
+    expected: expected.slice(0, 2 + expectedTail.start * 2) as Hex,
+    live: live.slice(0, 2 + liveTail.start * 2) as Hex,
+    expectedTail: expectedTail.raw as Hex,
+    liveTail: liveTail.raw as Hex,
+  };
+}
+
 async function verifyContract(
   resource: PreparedContract,
   client: Client,
@@ -421,9 +441,11 @@ async function verifyContract(
   const references = artifact.deployedBytecode.immutableReferences ?? {};
   const immutableCount = immutableEntries(references).length;
   const expected = expectedRuntime(resource, artifact);
+  // The metadata tail follows every compiler-marked range, so stripping it leaves immutable and link offsets valid.
+  const stripped = resource.ignoreMetadata ? stripMetadataTails(expected, code) : null;
   const comparison = compareRuntime(
-    expected,
-    code,
+    stripped?.expected ?? expected,
+    stripped?.live ?? code,
     references,
     artifact.deployedBytecode.linkReferences ?? {},
   );
@@ -432,6 +454,8 @@ async function verifyContract(
     liveSkeletonHash: comparison.liveSkeletonHash,
     immutables: [],
   };
+  if (stripped)
+    evidence.ignoredMetadata = { expected: stripped.expectedTail, live: stripped.liveTail };
   result.evidence = evidence;
 
   if (comparison.mode === 'mismatch') {
@@ -467,7 +491,17 @@ async function verifyContract(
   }
 
   let exact: ProofMethod | null = null;
-  if (immutableCount === 0) {
+  if (stripped && immutableCount === 0) {
+    // Equal bodies prove the code, not the build; the required code hash below proves the exact live bytes.
+    result.codeComparison = { mode: 'masked', matched: true };
+    result.proofs.push({
+      name: 'runtime-skeleton',
+      method: 'metadata-stripped-runtime',
+      expected: keccak256(stripped.expected),
+      actual: keccak256(stripped.live),
+      matched: true,
+    });
+  } else if (immutableCount === 0) {
     result.codeComparison = { mode: 'exact', matched: true };
     result.proofs.push({
       name: 'runtime',
@@ -481,7 +515,7 @@ async function verifyContract(
     result.codeComparison = { mode: 'masked', matched: true };
     result.proofs.push({
       name: 'runtime-skeleton',
-      method: 'masked-runtime',
+      method: stripped ? 'metadata-stripped-runtime' : 'masked-runtime',
       expected: comparison.expectedSkeletonHash,
       actual: comparison.liveSkeletonHash,
       matched: true,

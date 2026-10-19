@@ -13,7 +13,7 @@ A project has at least one contract. Each `resource` block has a type and a name
 
 ## Contracts and externals
 
-`artifact` is a compiled JSON path relative to `main.ethp`. Optional `source` and `name` must match the artifact's identities. A deployable contract needs `args`, including `[]` for a zero-argument constructor. Optional `libraries` links compiled libraries; `after` orders it after verified resources. `code_hash` pins expected runtime code. `signer_role` selects a signer, and `sender_independent = true` allows an eligible deployment to use a secondary deployer. See [pinned runtime](../recovery/stateful-constructors.md) for `creation_proof_mode` and `created_code`.
+`artifact` is a compiled JSON path relative to `main.ethp`. Optional `source` and `name` must match the artifact's identities. A deployable contract needs `args`, including `[]` for a zero-argument constructor. Optional `libraries` links compiled libraries; `after` orders it after verified resources. `code_hash` pins expected runtime code. `signer_role` selects a signer, and `sender_independent = true` allows an eligible deployment to use a secondary deployer. See [pinned runtime](../recovery/stateful-constructors.md) for `creation_proof_mode` and `created_code`. A contract adopted by `address` with a `code_hash` can set `ignore_metadata = true` to compare runtimes without their CBOR metadata tails; see [verify an existing contract](../verify/existing-contracts.md#different-builds).
 
 An external may add `code_hash` and getter checks. If it has checks, supply an `abi`. Writes that reference an external wait for its verification. A top-level `factory` block can specify the CREATE2 factory address and code hash; automated apply still requires the bundled runtime.
 

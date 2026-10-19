@@ -51,6 +51,7 @@ const IDENTITY_FIELDS = [
   'checks',
   'libraries',
   'expectedCodeHash',
+  'ignoreMetadata',
   'creationProofMode',
   'createdCode',
   'signerRole',

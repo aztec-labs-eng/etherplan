@@ -358,6 +358,92 @@ test('changed bytecode, a different build, and a different length are conflicts 
   assert.match(longer.reasons[0], /Live runtime is \d+ bytes; the artifact runtime is \d+ bytes\./);
 });
 
+test('ignoreMetadata compares runtimes without their metadata tails and keeps the code hash binding', async () => {
+  // A build with a solc-only tail, as bytecode_hash = "none" emits, against a live runtime with an IPFS tail.
+  const SOLC_ONLY_TAIL = 'a164736f6c634300081e000a';
+  const withTail = (code) =>
+    `${code.slice(0, 2 + decodeMetadataTail(code).start * 2)}${SOLC_ONLY_TAIL}`;
+
+  const live = sampleCode(HERE);
+  const liveTail = decodeMetadataTail(live).raw;
+  const client = mockClient({ codes: { [HERE]: live }, reads: sampleReads(HERE) });
+  const rebuilt = { ...artifacts.Sample };
+  rebuilt.deployedBytecode = {
+    ...rebuilt.deployedBytecode,
+    object: withTail(rebuilt.deployedBytecode.object),
+  };
+  const adopted = (extra) =>
+    imported('Sample', HERE, { artifact: rebuilt, expectedCodeHash: keccak256(live), ...extra });
+
+  const strict = await verifyResource(adopted({}), client);
+  assert.equal(strict.status, 'conflict');
+  assert.match(strict.reasons[0], /Live runtime is \d+ bytes; the artifact runtime is \d+ bytes\./);
+
+  const verified = await verifyResource(adopted({ ignoreMetadata: true }), client);
+  assert.equal(verified.status, 'verified');
+  assert.deepEqual(verified.codeComparison, { mode: 'exact', matched: true });
+  assert.deepEqual(
+    verified.proofs
+      .filter((proof) => proof.name.startsWith('runtime'))
+      .map((proof) => [proof.method, proof.matched]),
+    [
+      ['metadata-stripped-runtime', true],
+      ['expected-code-hash', true],
+    ],
+  );
+  assert.deepEqual(verified.evidence.ignoredMetadata, {
+    expected: `0x${SOLC_ONLY_TAIL}`,
+    live: liveTail,
+  });
+  assert.equal(
+    verified.evidence.immutables.every((item) => item.provenBy === 'expected-code-hash'),
+    true,
+  );
+
+  const changedBody = flip(live, 10);
+  const changed = await verifyResource(
+    adopted({ ignoreMetadata: true, expectedCodeHash: keccak256(changedBody) }),
+    mockClient({ codes: { [HERE]: changedBody }, reads: sampleReads(HERE) }),
+  );
+  assert.equal(changed.status, 'conflict');
+  assert.deepEqual(
+    { region: changed.evidence.difference.region, offset: changed.evidence.difference.offset },
+    { region: 'code', offset: 10 },
+  );
+
+  const wrongHash = await verifyResource(
+    adopted({ ignoreMetadata: true, expectedCodeHash: keccak256('0x00') }),
+    client,
+  );
+  assert.equal(wrongHash.status, 'conflict');
+  assert.match(wrongHash.reasons[0], /differs from the expected code hash/);
+
+  const doublerLive = runtime('Doubler', { address: HERE });
+  const doubler = { ...artifacts.Doubler };
+  doubler.deployedBytecode = {
+    ...doubler.deployedBytecode,
+    object: withTail(doubler.deployedBytecode.object),
+  };
+  const noImmutables = await verifyResource(
+    imported('Doubler', HERE, {
+      artifact: doubler,
+      expectedCodeHash: keccak256(doublerLive),
+      ignoreMetadata: true,
+    }),
+    mockClient({ codes: { [HERE]: doublerLive } }),
+  );
+  assert.equal(noImmutables.status, 'verified');
+  assert.equal(noImmutables.proofs[0].method, 'metadata-stripped-runtime');
+
+  const untailed = live.slice(0, 2 + decodeMetadataTail(live).start * 2);
+  const noTail = await verifyResource(
+    adopted({ ignoreMetadata: true, expectedCodeHash: keccak256(untailed) }),
+    mockClient({ codes: { [HERE]: untailed }, reads: sampleReads(HERE) }),
+  );
+  assert.equal(noTail.status, 'conflict');
+  assert.equal(noTail.evidence.ignoredMetadata, undefined);
+});
+
 test('an immutable with different values at its code ranges is a conflict', async () => {
   const slot = '00'.repeat(32);
   const artifact = normalizeArtifact(
