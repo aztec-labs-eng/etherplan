@@ -151,6 +151,7 @@ function buildContract(
   };
   if (Object.keys(libraries).length > 0) resource.libraries = libraries;
   if (item.codeHash !== undefined) resource.expectedCodeHash = item.codeHash;
+  if (item.ignoreMetadata) resource.ignoreMetadata = true;
   if (item.creationProofMode === 'pinned-runtime') {
     resource.creationProofMode = item.creationProofMode;
     resource.createdCode = item.createdCode!.map((child) => ({

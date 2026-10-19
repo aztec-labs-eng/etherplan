@@ -85,6 +85,8 @@ export interface PreparedContract extends PreparedBase {
   /** Present only when nonempty. */
   libraries?: Record<string, Address>;
   expectedCodeHash?: Hash;
+  /** Present only when true: runtimes are compared without their CBOR metadata tails. */
+  ignoreMetadata?: true;
   creationProofMode?: 'pinned-runtime';
   createdCode?: PreparedCreatedCode[];
   /** The next four are present together, for a CREATE2 deployment; absent for an imported address. */
@@ -213,6 +215,7 @@ export interface PlannedContract extends PlannedBase {
   checks: PreparedCheck[];
   libraries?: Record<string, Address>;
   expectedCodeHash?: Hash;
+  ignoreMetadata?: true;
   creationProofMode?: 'pinned-runtime';
   createdCode?: PreparedCreatedCode[];
   signerRole: string;

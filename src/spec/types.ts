@@ -63,6 +63,8 @@ export interface SpecContract {
   /** Matches `/^[a-z][a-z0-9_-]*$/`; the scheduler has lanes only for `deployer` and `owner`. */
   signerRole?: string;
   senderIndependent?: boolean;
+  /** For a contract adopted by `address` with a `codeHash`: compare runtimes without their CBOR metadata tails. */
+  ignoreMetadata?: boolean;
 }
 
 export interface SpecExternal {

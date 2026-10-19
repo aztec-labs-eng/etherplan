@@ -542,10 +542,41 @@ test('invalid .ethp and .ethpvars inputs fail with specific errors', async () =>
       owner,
       /reference must be contracts\.<name>\.address/,
     ],
+    [
+      'ignore_metadata on a CREATE2 deployment',
+      base({ contract: `code_hash = "${HASH}"\n  ignore_metadata = true` }),
+      owner,
+      /contract:registry ignoreMetadata requires an adopted address\./,
+    ],
+    [
+      'ignore_metadata not boolean',
+      base({ contract: 'ignore_metadata = "yes"' }),
+      owner,
+      /contract:registry ignoreMetadata must be boolean\./,
+    ],
   ];
   for (const [name, source, vars, expected] of cases) {
     assert.throws(() => parseSpec(compile(source, vars)), expected, name);
   }
+});
+
+test('ignore_metadata maps to ignoreMetadata on an adopted contract with a code hash', () => {
+  const adopted = (lines) => `chain_id = 1
+resource "contract" "registry" {
+  artifact = "Registry.json"
+  address  = "${OTHER}"
+  ${lines}
+}`;
+  const spec = parseSpec(compile(adopted(`code_hash = "${HASH}"\n  ignore_metadata = true`)));
+  assert.equal(spec.contracts[0].ignoreMetadata, true);
+  assert.equal(
+    parseSpec(compile(adopted('ignore_metadata = false'))).contracts[0].ignoreMetadata,
+    false,
+  );
+  assert.throws(
+    () => parseSpec(compile(adopted('ignore_metadata = true'))),
+    /contract:registry ignoreMetadata requires a codeHash\./,
+  );
 });
 
 test('the getter form checks a getter whose name is reserved in check blocks', async () => {

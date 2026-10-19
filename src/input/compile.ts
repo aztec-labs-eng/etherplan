@@ -66,6 +66,7 @@ const CONTRACT_FIELDS: FieldMap = {
   created_code: ['createdCode', 'createdCode'],
   signer_role: ['signerRole', 'constant'],
   sender_independent: ['senderIndependent', 'constant'],
+  ignore_metadata: ['ignoreMetadata', 'constant'],
 };
 const EXTERNAL_FIELDS: FieldMap = {
   address: ['address', 'constant'],
@@ -103,6 +104,7 @@ const CONTRACT_ORDER = [
   'createdCode',
   'signerRole',
   'senderIndependent',
+  'ignoreMetadata',
 ];
 const EXTERNAL_ORDER = ['address', 'codeHash', 'abi', 'checks'];
 const CALL_ORDER = [

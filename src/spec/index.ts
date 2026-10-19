@@ -373,6 +373,7 @@ export function parseSpec(raw: unknown): ParsedSpec {
         'createdCode',
         'signerRole',
         'senderIndependent',
+        'ignoreMetadata',
       ]),
       `Contract ${item.id ?? '<unknown>'}`,
     );
@@ -473,6 +474,15 @@ export function parseSpec(raw: unknown): ParsedSpec {
         typeof item.senderIndependent === 'boolean',
         `${fullId} senderIndependent must be boolean.`,
       );
+    if (item.ignoreMetadata !== undefined) {
+      assert(typeof item.ignoreMetadata === 'boolean', `${fullId} ignoreMetadata must be boolean.`);
+      // A CREATE2 address commits to the whole initcode, metadata included, so only an adopted address can skip it.
+      // The code hash keeps the binding to the exact live bytes.
+      if (item.ignoreMetadata) {
+        assert(item.address !== undefined, `${fullId} ignoreMetadata requires an adopted address.`);
+        assert(item.codeHash !== undefined, `${fullId} ignoreMetadata requires a codeHash.`);
+      }
+    }
   }
 
   for (const item of spec.calls) {

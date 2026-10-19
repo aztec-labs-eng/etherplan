@@ -91,6 +91,7 @@ function planResource(
       'checks',
       'libraries',
       'expectedCodeHash',
+      'ignoreMetadata',
       'creationProofMode',
       'createdCode',
       'signerRole',
