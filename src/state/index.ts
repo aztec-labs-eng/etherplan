@@ -559,15 +559,20 @@ export function recordResource({
     existing !== undefined &&
     !sameDeployment(existing, { address: resource.address, initcodeHash, inputsHash });
   // A rebuilt artifact for the same deployment changes provenance, not identity. Only import --rebaseline accepts a new
-  // artifact for an imported contract.
+  // artifact for an imported contract. A contract that the spec adopts by address is recorded as observed, and planning
+  // already accepts its drift, so it takes the same path as a deployed contract.
   const rebaseline =
     contract !== undefined &&
     !identityChanged &&
     contract.artifactHash.toLowerCase() !== artifactHash?.toLowerCase();
   let revision: ArtifactRevision | undefined;
   if (rebaseline) {
+    const adopted =
+      initcodeHash === null &&
+      contract.initcodeHash === null &&
+      contract.provenance?.kind === 'observed';
     assert(
-      contract.initcodeHash !== null,
+      contract.initcodeHash !== null || adopted,
       `${resource.id} is an imported contract. Accept its new artifact with import --rebaseline.`,
     );
     assertSameCode(contract, verification, resource.id);

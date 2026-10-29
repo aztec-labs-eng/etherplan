@@ -20,7 +20,7 @@ If verification fails, the plan marks the contract `conflict` and puts the reaso
 
 ## Adopted contracts
 
-A contract that the spec adopts by `address` is reused the same way after a rebuild, when the address and constructor inputs match recorded state, the live code hash equals the saved code hash, and the new artifact verifies the live contract. Each plan verifies an adopted contract again, so no import proof is involved. This applies to a record that plan and apply observed; a record without provenance is treated as an import.
+A contract that the spec adopts by `address` is reused the same way after a rebuild, when the address and constructor inputs match recorded state, the live code hash equals the saved code hash, and the new artifact verifies the live contract. Each plan verifies an adopted contract again, so no import proof is involved. Apply records the new artifact and appends the previous one to `artifactRevisions`; the record stays `observed`. This applies to a record that plan and apply observed; a record without provenance is treated as an import.
 
 ## Imported contracts
 

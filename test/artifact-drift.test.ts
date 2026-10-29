@@ -313,6 +313,47 @@ test('an artifact-only rebuild of a contract adopted by address is reused, with 
   );
 });
 
+test('recording a rebuilt artifact for a contract adopted by address appends an artifact revision', async () => {
+  const client = mockChain();
+  const state = await adoptedState(client);
+  const before = state.resources['contract:vault'];
+  const resource = prepared(importSpec(), rebuilt);
+  const verification = await verifyResource(resource, client);
+  const vault = await planVault({ spec: importSpec(), client, state });
+  assert.equal(vault.action, 'reuse');
+
+  const rebaselined = recordResource({ resource, verification, state, chain: chainIdentity });
+  const record = rebaselined.resources['contract:vault'];
+  assert.equal(record.artifactHash, rebuilt.artifactHash);
+  assert.deepEqual(record.artifactRevisions, [
+    {
+      artifactHash: original.artifactHash,
+      sourceHash: original.buildIdentity.sourceHash,
+      proofHash: before.proofHash,
+      codeHash: before.codeHash,
+    },
+  ]);
+  for (const key of DEPLOYMENT_FIELDS) assert.deepEqual(record[key], before[key], key);
+  assert.deepEqual(record.provenance, { kind: 'observed' });
+  assert.doesNotThrow(() => validateState(rebaselined));
+
+  // The live code must still match the saved code.
+  const moved = structuredClone(state);
+  moved.resources['contract:vault'].codeHash = `0x${'77'.repeat(32)}`;
+  assert.throws(
+    () => recordResource({ resource, verification, state: moved, chain: chainIdentity }),
+    /live code hash differs from the saved code hash/,
+  );
+
+  // A record without provenance may come from an older import, so it keeps the explicit rebaseline.
+  const unknown = structuredClone(state);
+  delete unknown.resources['contract:vault'].provenance;
+  assert.throws(
+    () => recordResource({ resource, verification, state: unknown, chain: chainIdentity }),
+    /Accept its new artifact with import --rebaseline/,
+  );
+});
+
 test('a saved deployment does not drift when only top-level ABI order changes', async () => {
   const raw = {
     abi: [
