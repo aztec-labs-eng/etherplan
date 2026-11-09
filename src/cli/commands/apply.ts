@@ -65,8 +65,6 @@ export async function apply(context: ChainCommandContext): Promise<void> {
     throw new Error('A pipeline apply needs an explicit saved plan with --plan.');
   if (options.backend && !options['signer-module'])
     throw new Error('AWS apply needs --signer-module file.mjs.');
-  if (options.plan && options['max-spend-wei'])
-    throw new Error('A saved plan already pins maxSpendWei; omit --max-spend-wei.');
   const signerSource: SignerSource = options['signer-module']
     ? await signerFromModule(options['signer-module'])
     : { signers: signersFromEnvironment() };
@@ -127,6 +125,7 @@ export async function apply(context: ChainCommandContext): Promise<void> {
       parallel: options.parallel ?? false,
       pipeline: options.pipeline ?? false,
       replacementFees,
+      ...(options['max-spend-wei'] ? { budgets: capBudgets(plan, options['max-spend-wei']) } : {}),
       ...transactionOptions,
       ...(progress ? { reporter: progress.reporter } : {}),
     };
@@ -151,4 +150,12 @@ export async function apply(context: ChainCommandContext): Promise<void> {
   } finally {
     progress?.stop();
   }
+}
+
+// Apply enforces the smaller of this cap and the plan's maxSpendWei, so a flag can only lower it.
+function capBudgets(plan: Plan, cap: string): Record<string, string> {
+  const signers = plan.pipeline ?? plan.signers;
+  if (!signers) return {};
+  const addresses = signers.owner ? [...signers.deployers, signers.owner] : signers.deployers;
+  return Object.fromEntries(addresses.map((address) => [address, cap]));
 }

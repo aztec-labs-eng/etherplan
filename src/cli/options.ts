@@ -314,6 +314,7 @@ const WHOLE = /^[0-9]+$/;
 // Config can supply these, so the checks run on the merged options.
 function validateApplyValues(options: CliOptions): void {
   for (const name of [
+    'max-spend-wei',
     'max-fee-per-gas',
     'priority-fee-per-gas',
     'receipt-timeout-ms',
@@ -329,6 +330,8 @@ function validateApplyValues(options: CliOptions): void {
       );
     }
   }
+  if (options['max-spend-wei'] !== undefined && BigInt(options['max-spend-wei']) === 0n)
+    throw new UsageError('--max-spend-wei must be positive.');
   const maxFee = options['max-fee-per-gas'];
   const priorityFee = options['priority-fee-per-gas'];
   if ((maxFee === undefined) !== (priorityFee === undefined))
