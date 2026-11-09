@@ -10,7 +10,7 @@ Set `ETH_RPC_URL` to the same chain used for planning. Put the deployer's key in
 etherplan apply --plan plan.json
 ```
 
-A saved plan already pins the signer addresses and spend ceiling. `apply --plan` does not ask for approval again. It checks the current spec, artifacts, signers, state, and live chain before signing; a stale or conflicting plan stops. If planning used `--signer-module`, pass the same module to apply. The [KMS signer provider](../operations/kms-signers.md) is one option.
+A saved plan already pins the signer addresses and spend ceiling. Pass `--max-spend-wei` to apply a lower ceiling for this run; apply uses the smaller of the two. `apply --plan` does not ask for approval again. It checks the current spec, artifacts, signers, state, and live chain before signing; a stale or conflicting plan stops. If planning used `--signer-module`, pass the same module to apply. The [KMS signer provider](../operations/kms-signers.md) is one option.
 
 ## Create and approve a fresh plan
 

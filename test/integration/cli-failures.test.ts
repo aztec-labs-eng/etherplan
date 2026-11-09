@@ -228,6 +228,55 @@ test('an insufficient deployer balance stops before signing and resumes after fu
   }
 });
 
+test('apply --max-spend-wei caps a saved plan below its own ceiling before signing', async () => {
+  const anvil = await startAnvil();
+  const ws = await workspace('etherplan-cli-cap-');
+  try {
+    const planned = runSync(
+      [
+        'plan',
+        '--fixture',
+        ws.specFile,
+        '--out',
+        ws.planFile,
+        '--state',
+        ws.stateFile,
+        ...planArgs,
+      ],
+      anvil.rpcUrl,
+    );
+    assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
+
+    const capped = runSync(
+      [
+        'apply',
+        '--fixture',
+        ws.specFile,
+        '--plan',
+        ws.planFile,
+        '--state',
+        ws.stateFile,
+        '--journal',
+        ws.journalFile,
+        '--max-spend-wei',
+        '1',
+      ],
+      anvil.rpcUrl,
+      true,
+    );
+    assert.equal(capped.status, 1);
+    assert.match(`${capped.stdout}\n${capped.stderr}`, /budget-exceeded/i);
+    assert.equal(await anvil.rpc('eth_getTransactionCount', [deployer.address, 'latest']), '0x0');
+    assert.equal(
+      (await records(ws.journalFile)).some((record) => record.phase === 'signed'),
+      false,
+    );
+  } finally {
+    await rm(ws.directory, { recursive: true, force: true });
+    await stopAnvil(anvil);
+  }
+});
+
 test('CLI replans from a verified deployment in the journal after a later call fails', async () => {
   const anvil = await startAnvil();
   const ws = await workspace('etherplan-cli-partial-');
