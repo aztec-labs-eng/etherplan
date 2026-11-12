@@ -2,12 +2,14 @@
 import { readFile } from 'node:fs/promises';
 import { createPublicClient, http } from 'viem';
 import { applyPlan } from '../../src/execution/index.ts';
-import { accounts, fixture, fixtureMany } from './chain.ts';
+import { accounts, fixture, fixtureCalls, fixtureMany } from './chain.ts';
 
 const config = JSON.parse(process.argv[2]);
 const { spec, artifacts } = config.fixtureMany
   ? fixtureMany(config.fixtureMany)
-  : fixture(config.fixture);
+  : config.fixtureCalls
+    ? fixtureCalls(config.fixtureCalls)
+    : fixture(config.fixture);
 const plan = JSON.parse(await readFile(config.planFile, 'utf8'));
 const client = createPublicClient({ transport: http(config.rpcUrl) });
 let seen = 0;
