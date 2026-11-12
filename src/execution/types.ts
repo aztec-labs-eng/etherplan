@@ -753,6 +753,8 @@ export interface ApplyOptions {
   /** Maximum time to retry provider failures while verifying a successful deployment. Defaults to five minutes. */
   verificationTimeoutMs?: number;
   gasMultiplier?: number;
+  /** Maximum fee per gas as a multiple of the latest base fee, plus the priority fee. Defaults to 2; `fees` replaces it. */
+  baseFeeMultiplier?: number;
   fees?: FeeOverride | null;
   /** Lowercase address to wei ceiling; the plan's `maxSpendWei` caps it. */
   budgets?: Record<string, bigint | number | string>;
@@ -770,6 +772,7 @@ export interface ApplyConfig {
   receiptTimeoutMs: number;
   verificationTimeoutMs: number;
   gasMultiplier: number;
+  baseFeeMultiplier: number;
   fees: FeeOverride | null;
   budgets: Record<string, bigint | number | string>;
   hooks: ApplyHooks;

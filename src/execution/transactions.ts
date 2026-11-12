@@ -34,14 +34,32 @@ function toBigInt(value: unknown, name: string): bigint {
   throw new Error(`${name} must be a non-negative integer.`);
 }
 
+export const DEFAULT_BASE_FEE_MULTIPLIER = 2;
+
+/**
+ * Without an override, the cap is the latest block's base fee times `baseFeeMultiplier`, plus the RPC's priority
+ * fee. The base fee can rise 12.5% per block, and a transaction waits while the base fee is above its cap, so the
+ * multiple is the headroom that keeps a signed transaction includable. The chain charges the base fee of the
+ * including block, not the cap.
+ */
 export async function feesFor(
   client: Client,
   override?: FeeOverride | null,
+  baseFeeMultiplier: number = DEFAULT_BASE_FEE_MULTIPLIER,
 ): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
-  const fees = override ?? (await client.estimateFeesPerGas());
+  if (override)
+    return {
+      maxFeePerGas: toBigInt(override.maxFeePerGas, 'maxFeePerGas'),
+      maxPriorityFeePerGas: toBigInt(override.maxPriorityFeePerGas, 'maxPriorityFeePerGas'),
+    };
+  const [block, estimate] = await Promise.all([client.getBlock(), client.estimateFeesPerGas()]);
+  if (typeof block.baseFeePerGas !== 'bigint')
+    throw new Error('The latest block has no base fee; the chain does not support EIP-1559 fees.');
+  const maxPriorityFeePerGas = toBigInt(estimate.maxPriorityFeePerGas, 'maxPriorityFeePerGas');
+  const scale = BigInt(Math.round(baseFeeMultiplier * 1000));
   return {
-    maxFeePerGas: toBigInt(fees.maxFeePerGas, 'maxFeePerGas'),
-    maxPriorityFeePerGas: toBigInt(fees.maxPriorityFeePerGas, 'maxPriorityFeePerGas'),
+    maxFeePerGas: (block.baseFeePerGas * scale + 999n) / 1000n + maxPriorityFeePerGas,
+    maxPriorityFeePerGas,
   };
 }
 

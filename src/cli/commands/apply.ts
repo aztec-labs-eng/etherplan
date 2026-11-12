@@ -51,6 +51,9 @@ export async function apply(context: ChainCommandContext): Promise<void> {
     ...(options['gas-multiplier'] === undefined
       ? {}
       : { gasMultiplier: Number(options['gas-multiplier']) }),
+    ...(options['base-fee-multiplier'] === undefined
+      ? {}
+      : { baseFeeMultiplier: Number(options['base-fee-multiplier']) }),
     ...(options['receipt-timeout-ms'] === undefined
       ? {}
       : { receiptTimeoutMs: Number(options['receipt-timeout-ms']) }),

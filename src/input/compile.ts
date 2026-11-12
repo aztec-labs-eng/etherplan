@@ -138,6 +138,7 @@ export const CONFIG_OPTIONS: ConfigOptionName[] = [
   'max-fee-per-gas',
   'priority-fee-per-gas',
   'gas-multiplier',
+  'base-fee-multiplier',
   'receipt-timeout-ms',
   'verification-timeout-ms',
 ];
@@ -147,6 +148,7 @@ const CONFIG_NUMBERS = new Map([
   ['max-fee-per-gas', /^[0-9]+$/],
   ['priority-fee-per-gas', /^[0-9]+$/],
   ['gas-multiplier', /^[0-9]+(?:\.[0-9]+)?$/],
+  ['base-fee-multiplier', /^[0-9]+(?:\.[0-9]+)?$/],
   ['receipt-timeout-ms', /^[0-9]+$/],
   ['verification-timeout-ms', /^[0-9]+$/],
 ]);
@@ -855,8 +857,8 @@ export function compileConfig(
           assert(
             typeof text === 'string' && number.test(text),
             attribute.value,
-            name === 'gas-multiplier'
-              ? 'gas-multiplier must be a whole number or a quoted decimal, such as "1.5".'
+            name.endsWith('-multiplier')
+              ? `${name} must be a whole number or a quoted decimal, such as "1.5".`
               : `${name} must be a whole number${name.endsWith('-ms') ? ' of milliseconds' : ' of wei'}.`,
           );
           return [name, text];
