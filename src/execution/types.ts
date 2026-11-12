@@ -633,7 +633,6 @@ export type ApplyErrorCode =
   | 'schedule'
   | 'stale-artifact'
   | 'stale-observation'
-  | 'stale-pipeline'
   | 'stale-resource'
   | 'stale-spec'
   | 'stale-state'

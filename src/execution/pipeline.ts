@@ -126,8 +126,10 @@ export function pipelineAttempt(
   ) {
     throw new ApplyError('journal', `Wave ${wave.wave} has an ambiguous abandoned attempt.`);
   }
+  // An attempt has no intent for an action that was already satisfied when it reserved its
+  // nonces. A journal without an attempt ID is older than that rule and has one intent per action.
   if (
-    intents.length !== wave.batches.flat().length ||
+    (!attemptId && intents.length !== wave.batches.flat().length) ||
     signatures.some(
       (record) =>
         !intents.some(
@@ -160,9 +162,18 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
   }
   const groups = new Map<string, ResumeJob[]>();
   const jobs: ResumeJob[] = [];
-  for (const entry of entries) {
-    const intent = byAction.get(entry.id);
-    const item = ctx.prepared.get(entry.id);
+  const skipped: PreparedAction[] = [];
+  for (const saved of entries) {
+    const intent = byAction.get(saved.id);
+    const item = ctx.prepared.get(saved.id);
+    if (!intent && item) {
+      // The attempt reserved no nonce for this action, because it was already satisfied.
+      skipped.push(item);
+      continue;
+    }
+    // The reserved offset of an action is its position among the actions of its signer that
+    // have an intent. It is the saved offset when the attempt left no action out.
+    const entry = { ...saved, nonceOffset: groups.get(saved.signer)?.length ?? 0 };
     const signer = ctx.lanes.byAddress.get(entry.signer);
     const tx = item ? transactionFor(item) : null;
     if (
@@ -170,7 +181,7 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
       !item ||
       !signer ||
       intent.signer?.toLowerCase() !== entry.signer ||
-      typeof entry.nonceOffset !== 'number' ||
+      typeof saved.nonceOffset !== 'number' ||
       intent.nonceOffset !== entry.nonceOffset ||
       intent.to?.toLowerCase() !== tx?.to.toLowerCase() ||
       intent.value !== tx?.value ||
@@ -272,12 +283,8 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
     groups.set(entry.signer, group);
     jobs.push(job);
   }
-  if (byAction.size !== entries.length)
+  if (byAction.size !== jobs.length)
     throw new ApplyError('journal', `Wave ${wave.wave} has intents outside its saved schedule.`);
-  for (const group of groups.values()) {
-    if (group[0]?.entry.nonceOffset !== 0)
-      throw new ApplyError('journal', `Wave ${wave.wave} has an invalid first nonce offset.`);
-  }
   if (
     new Set([...groups.values()].map((group) => group[0]!.intent.reservationId)).size !==
     groups.size
@@ -338,6 +345,15 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
   }
   for (const job of jobs.filter((entry) => entry.records.at(-1)?.phase === 'verified'))
     await decide(ctx, job.item);
+  // An action without an intent must still be satisfied: this attempt has no nonce for it.
+  for (const item of skipped) {
+    if (await decide(ctx, item))
+      throw new ApplyError(
+        'conflict',
+        `Wave ${wave.wave} reserved no nonce for ${item.planned.id}, because it was already satisfied, but it is not satisfied now.`,
+        { actionId: item.planned.id },
+      );
+  }
   const outstanding = jobs.filter(
     (job) => job.records.at(-1)?.phase !== 'verified' && !job.receipt,
   );
@@ -562,7 +578,7 @@ function intentFields(
   };
 }
 
-/** Pipeline signing reserves each signer group's saved nonce offsets; every intent precedes every signature. */
+/** Pipeline signing reserves consecutive nonces for each signer group in its saved order; every intent precedes every signature. */
 export interface PipelineSigningInput {
   wave: number;
   work: PipelineFundedJob[];
@@ -603,13 +619,10 @@ export async function signPipelineBatch(
         `Signer ${signer} has unknown pending transactions.`,
         { signer: signer as Address, nonce: String(latest) },
       );
+    // The saved offsets give the order. An already satisfied action sends no transaction, so
+    // the actions after it move up, and each intent records the offset that it reserves.
     for (const [offset, job] of jobs.entries()) {
-      if (job.entry.nonceOffset !== offset)
-        throw new ApplyError(
-          'stale-pipeline',
-          `Wave ${wave} has an already satisfied action before ${job.item.planned.id}; create a new pipeline plan.`,
-          { actionId: job.item.planned.id },
-        );
+      job.entry = { ...job.entry, nonceOffset: offset };
       job.envelope.nonce = latest + offset;
     }
   }

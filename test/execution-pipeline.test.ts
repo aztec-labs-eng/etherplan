@@ -10,7 +10,14 @@ import { fileURLToPath } from 'node:url';
 import { createPublicClient, createWalletClient, http, keccak256, parseTransaction } from 'viem';
 import { applyPlan } from '../src/execution/index.ts';
 import { createPlan } from '../src/planning/index.ts';
-import { deployerA, deployerB, fixtureMany, startAnvil } from './execution/chain.ts';
+import {
+  deployerA,
+  deployerB,
+  fixtureCalls,
+  fixtureMany,
+  owner,
+  startAnvil,
+} from './execution/chain.ts';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const CHILD = fileURLToPath(new URL('./execution/apply-child.ts', import.meta.url));
@@ -998,6 +1005,159 @@ test('P-13: unknown pending signer transaction is rejected before reservation', 
         ['intent', 'signed'].includes(record.phase),
       ).length,
       0,
+    );
+  } finally {
+    await chain.stop();
+  }
+});
+
+async function callsInput(chain, satisfied) {
+  const { spec, artifacts } = fixtureCalls({ satisfied });
+  const plan = await createPlan({
+    spec,
+    artifacts,
+    client: chain.client,
+    pipeline: { deployers: [deployerA.address], owner: owner.address, parallel: false },
+    maxSpendWei: '100000000000000000000',
+  });
+  return { plan, spec, artifacts };
+}
+
+const ownerSigners = { deployer: [deployerA], owner };
+const savedOwnerOffsets = (plan) =>
+  plan.pipeline.waves[1].signerGroups.find((group) => group.signer === owner.address.toLowerCase())
+    .actions;
+
+async function assertCallsApplied(chain, ws, result, satisfied) {
+  assert.equal(result.status, 'applied');
+  const sent = [0, 1, 2].filter((index) => !satisfied.includes(index));
+  for (const index of [0, 1, 2]) {
+    const outcome = result.resources.find((resource) => resource.id === `call:bind${index}`);
+    assert.equal(outcome.outcome, satisfied.includes(index) ? 'already-satisfied' : 'applied');
+  }
+  assert.equal(
+    result.resources.find((resource) => resource.id === 'contract:holder').outcome,
+    'applied',
+  );
+  // The calls that remain take consecutive nonces in their saved order.
+  const signed = (await recordsOf(ws.journalFile)).filter(
+    (record) => record.phase === 'signed' && record.actionId.startsWith('call:'),
+  );
+  assert.deepEqual(
+    signed.map((record) => [record.actionId, Number(record.nonce), record.nonceOffset]),
+    sent.map((index, offset) => [`call:bind${index}`, offset, offset]),
+  );
+  assert.equal(await chain.client.getTransactionCount({ address: owner.address }), sent.length);
+  assert.equal(await chain.client.getTransactionCount({ address: deployerA.address }), 4);
+}
+
+test('an action that is already satisfied at apply takes no nonce, and the later actions of its signer move up', async () => {
+  for (const satisfied of [[0, 1, 2], [0], [1], [2], [0, 2]]) {
+    const chain = await startAnvil();
+    try {
+      const input = await callsInput(chain, satisfied);
+      // The plan cannot read a registry that it deploys, so each call has a saved offset.
+      assert.deepEqual(savedOwnerOffsets(input.plan), [
+        { id: 'call:bind0', nonceOffset: 0 },
+        { id: 'call:bind1', nonceOffset: 1 },
+        { id: 'call:bind2', nonceOffset: 2 },
+      ]);
+      const ws = await workspace();
+      const result = await apply(chain, input, ws, { signers: ownerSigners });
+      await assertCallsApplied(chain, ws, result, satisfied);
+    } catch (error) {
+      error.message = `satisfied ${JSON.stringify(satisfied)}: ${error.message}`;
+      throw error;
+    } finally {
+      await chain.stop();
+    }
+  }
+});
+
+test('an interrupted wave with an already satisfied action resumes its reserved nonces', async () => {
+  for (const crash of [
+    { phase: 'intent', occurrence: 5 },
+    { phase: 'signed', occurrence: 4 },
+    { phase: 'signed', occurrence: 6 },
+    { phase: 'receipt', occurrence: 4 },
+  ]) {
+    const chain = await startAnvil();
+    try {
+      const satisfied = [1];
+      const input = await callsInput(chain, satisfied);
+      const ws = await workspace();
+      await writeFile(ws.planFile, JSON.stringify(input.plan));
+      const killed = await runChild({
+        rpcUrl: chain.url,
+        planFile: ws.planFile,
+        stateFile: ws.stateFile,
+        journalFile: ws.journalFile,
+        deployers: [0],
+        owner: 3,
+        pipeline: true,
+        fixtureCalls: { satisfied },
+        crash,
+      });
+      assert.equal(
+        killed.signal,
+        'SIGKILL',
+        `${crash.phase}/${crash.occurrence}: ${killed.stderr}`,
+      );
+      const before = (await recordsOf(ws.journalFile)).filter(
+        (record) => record.phase === 'signed' && record.wave === 2,
+      );
+      const result = await apply(chain, input, ws, { signers: ownerSigners });
+      await assertCallsApplied(chain, ws, result, satisfied);
+      const after = (await recordsOf(ws.journalFile)).filter(
+        (record) => record.phase === 'signed' && record.wave === 2,
+      );
+      assert.equal(after.length, 3, `${crash.phase}/${crash.occurrence}`);
+      assert.deepEqual(after.slice(0, before.length), before);
+    } catch (error) {
+      error.message = `${crash.phase}/${crash.occurrence}: ${error.message}`;
+      throw error;
+    } finally {
+      await chain.stop();
+    }
+  }
+});
+
+test('a resumed wave stops when an action that it left out is no longer satisfied', async () => {
+  const chain = await startAnvil();
+  try {
+    const satisfied = [1];
+    const input = await callsInput(chain, satisfied);
+    const ws = await workspace();
+    await writeFile(ws.planFile, JSON.stringify(input.plan));
+    const killed = await runChild({
+      rpcUrl: chain.url,
+      planFile: ws.planFile,
+      stateFile: ws.stateFile,
+      journalFile: ws.journalFile,
+      deployers: [0],
+      owner: 3,
+      pipeline: true,
+      fixtureCalls: { satisfied },
+      crash: { phase: 'signed', occurrence: 4 },
+    });
+    assert.equal(killed.signal, 'SIGKILL', killed.stderr);
+    const registry1 = input.plan.resources.find(
+      (resource) => resource.id === 'contract:registry1',
+    ).address;
+    const wallet = createWalletClient({ account: owner, transport: http(chain.url) });
+    const hash = await wallet.sendTransaction({
+      chain: null,
+      to: registry1,
+      data: `0x${keccak256(new TextEncoder().encode('setBinding(address)')).slice(2, 10)}${'2'.padStart(64, '0')}`,
+    });
+    await chain.client.waitForTransactionReceipt({ hash });
+    const signedBefore = (await recordsOf(ws.journalFile)).filter(
+      (record) => record.phase === 'signed',
+    ).length;
+    await rejectsCode(apply(chain, input, ws, { signers: ownerSigners }), 'drift');
+    assert.equal(
+      (await recordsOf(ws.journalFile)).filter((record) => record.phase === 'signed').length,
+      signedBefore,
     );
   } finally {
     await chain.stop();
