@@ -263,10 +263,36 @@ export async function nonceConsumed(
   return BigInt(latest) > BigInt(nonce);
 }
 
+const MAX_NONCE_GRACE_MS = 30_000;
+
+// Call this after the nonce shows as used. An RPC node, for example behind a load balancer, can show
+// the used nonce before it has the receipt. Thus wait up to the receipt timeout, at most 30 seconds,
+// before deciding that a transaction outside the journal used the nonce.
+export async function receiptAfterNonceUse(
+  client: Client,
+  signedVariants: { transactionHash: Hash }[],
+  { pollIntervalMs, receiptTimeoutMs }: { pollIntervalMs: number; receiptTimeoutMs: number },
+): Promise<Receipt | null> {
+  const deadline = Date.now() + Math.min(receiptTimeoutMs, MAX_NONCE_GRACE_MS);
+  for (;;) {
+    const receipt = await findKnownReceipt(client, signedVariants);
+    if (receipt || Date.now() >= deadline) return receipt;
+    await sleep(pollIntervalMs);
+  }
+}
+
 // Waits until the transaction has a receipt, another transaction uses its nonce, or the timeout passes.
 export async function waitForReceipt(
   client: Client,
-  { hash, signedVariants, signer, nonce, pollIntervalMs, timeoutMs }: WaitForReceiptInput,
+  {
+    hash,
+    signedVariants,
+    signer,
+    nonce,
+    pollIntervalMs,
+    timeoutMs,
+    receiptTimeoutMs,
+  }: WaitForReceiptInput,
 ): Promise<ReceiptWait> {
   const deadline = Date.now() + timeoutMs;
   const variants = signedVariants ?? (hash === undefined ? [] : [{ transactionHash: hash }]);
@@ -274,7 +300,10 @@ export async function waitForReceipt(
     const receipt = await findKnownReceipt(client, variants);
     if (receipt) return { receipt };
     if (await nonceConsumed(client, signer, nonce)) {
-      const late = await findKnownReceipt(client, variants);
+      const late = await receiptAfterNonceUse(client, variants, {
+        pollIntervalMs,
+        receiptTimeoutMs,
+      });
       return late ? { receipt: late } : { dead: true };
     }
     if (Date.now() >= deadline) return { timeout: true };
