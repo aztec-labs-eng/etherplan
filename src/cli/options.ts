@@ -17,6 +17,7 @@ export type CliOptions = {
   'max-fee-per-gas'?: string;
   'priority-fee-per-gas'?: string;
   'gas-multiplier'?: string;
+  'base-fee-multiplier'?: string;
   'replace-max-fee-per-gas'?: string;
   'replace-priority-fee-per-gas'?: string;
   'replace-max-cost-wei'?: string;
@@ -87,6 +88,7 @@ export const COMMANDS = {
       'max-fee-per-gas',
       'priority-fee-per-gas',
       'gas-multiplier',
+      'base-fee-multiplier',
       'replace-max-fee-per-gas',
       'replace-priority-fee-per-gas',
       'replace-max-cost-wei',
@@ -135,10 +137,13 @@ const OPTION_HELP = {
   deployers: 'Comma-separated deployer addresses',
   owner: 'Owner signer address for planning or scheduling',
   'max-spend-wei': 'Reviewed maximum total cost in wei per signer for a write plan',
-  'max-fee-per-gas': 'Maximum fee per gas in wei for new transactions (default: RPC estimate)',
+  'max-fee-per-gas':
+    'Maximum fee per gas in wei for new transactions (default: --base-fee-multiplier times the base fee, plus the priority fee)',
   'priority-fee-per-gas':
     'Priority fee per gas in wei for new transactions (default: RPC estimate)',
   'gas-multiplier': 'Gas limit as a multiple of the RPC gas estimate, at least 1 (default: 1.2)',
+  'base-fee-multiplier':
+    'Maximum fee per gas as a multiple of the latest base fee, at least 1, when --max-fee-per-gas is not set (default: 2)',
   'replace-max-fee-per-gas': 'Replacement transaction maximum fee per gas in wei',
   'replace-priority-fee-per-gas': 'Replacement transaction priority fee per gas in wei',
   'replace-max-cost-wei': 'Maximum cost in wei for each replacement transaction',
@@ -172,6 +177,7 @@ const VALUE_OPTIONS = new Set([
   'max-fee-per-gas',
   'priority-fee-per-gas',
   'gas-multiplier',
+  'base-fee-multiplier',
   'replace-max-fee-per-gas',
   'replace-priority-fee-per-gas',
   'replace-max-cost-wei',
@@ -342,11 +348,13 @@ function validateApplyValues(options: CliOptions): void {
     throw new UsageError('--max-fee-per-gas must be positive.');
   if (maxFee !== undefined && BigInt(priorityFee!) > BigInt(maxFee))
     throw new UsageError('--priority-fee-per-gas cannot exceed --max-fee-per-gas.');
-  const multiplier = options['gas-multiplier'];
-  if (
-    multiplier !== undefined &&
-    (!/^[0-9]+(?:\.[0-9]+)?$/.test(multiplier) || Number(multiplier) < 1)
-  ) {
-    throw new UsageError('--gas-multiplier must be a decimal number no less than 1, such as 1.5.');
+  for (const name of ['gas-multiplier', 'base-fee-multiplier'] as const) {
+    const multiplier = options[name];
+    if (
+      multiplier !== undefined &&
+      (!/^[0-9]+(?:\.[0-9]+)?$/.test(multiplier) || Number(multiplier) < 1)
+    ) {
+      throw new UsageError(`--${name} must be a decimal number no less than 1, such as 1.5.`);
+    }
   }
 }

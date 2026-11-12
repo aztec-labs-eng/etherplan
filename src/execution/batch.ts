@@ -44,7 +44,7 @@ export async function prepareBatch(
   }
   if (candidates.length === 0) return [];
 
-  const fees = await feesFor(ctx.client, ctx.config.fees);
+  const fees = await feesFor(ctx.client, ctx.config.fees, ctx.config.baseFeeMultiplier);
   const work: FundedJob[] = [];
   for (const job of candidates) {
     const tx = transactionFor(job.item);

@@ -54,6 +54,7 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
     'max-fee-per-gas',
     'priority-fee-per-gas',
     'gas-multiplier',
+    'base-fee-multiplier',
     'receipt-timeout-ms',
   ]) {
     assert.match(cli('apply', '--help').stdout, new RegExp(`--${flag}`));
@@ -102,6 +103,7 @@ test('apply fee, gas, and timeout values are checked after config is merged', ()
     'max-fee-per-gas': '30000000000',
     'priority-fee-per-gas': '0',
     'gas-multiplier': '1.5',
+    'base-fee-multiplier': '3',
     'receipt-timeout-ms': '0',
   });
   const cases = [
@@ -118,6 +120,11 @@ test('apply fee, gas, and timeout values are checked after config is merged', ()
     ],
     [{ 'gas-multiplier': '0.9' }, /--gas-multiplier must be a decimal number no less than 1/],
     [{ 'gas-multiplier': '1e3' }, /--gas-multiplier must be/],
+    [
+      { 'base-fee-multiplier': '0.9' },
+      /--base-fee-multiplier must be a decimal number no less than 1/,
+    ],
+    [{ 'base-fee-multiplier': 'double' }, /--base-fee-multiplier must be/],
     [{ 'receipt-timeout-ms': '-5' }, /--receipt-timeout-ms must be a whole number of milliseconds/],
     [
       { 'verification-timeout-ms': '99999999999999999999' },
