@@ -12,6 +12,7 @@ import {
   findKnownReceipt,
   findReceipt,
   nonceConsumed,
+  receiptAfterNonceUse,
   receiptJson,
   signEnvelope,
   validateSignedTransaction,
@@ -303,6 +304,7 @@ async function awaitReceipt(
     nonce: signed.nonce,
     pollIntervalMs: ctx.config.pollIntervalMs,
     timeoutMs: ctx.config.receiptTimeoutMs,
+    receiptTimeoutMs: ctx.config.receiptTimeoutMs,
   });
   if ('dead' in waited) {
     return fail(
@@ -366,7 +368,7 @@ export async function send(
       const receipt = await findKnownReceipt(ctx.client, variants);
       if (receipt) return receipt;
       if (await nonceConsumed(ctx.client, signed.signer, signed.nonce)) {
-        const late = await findKnownReceipt(ctx.client, variants);
+        const late = await receiptAfterNonceUse(ctx.client, variants, ctx.config);
         if (late) return late;
         await fail(
           ctx,
@@ -590,7 +592,7 @@ async function settle(
   );
   let receipt = await findKnownReceipt(ctx.client, variants);
   if (!receipt && (await nonceConsumed(ctx.client, signed.signer, signed.nonce))) {
-    receipt = await findKnownReceipt(ctx.client, variants);
+    receipt = await receiptAfterNonceUse(ctx.client, variants, ctx.config);
     if (!receipt) {
       await fail(
         ctx,
@@ -634,7 +636,7 @@ async function settleForeign(ctx: ApplyContext, signed: SignedRecord): Promise<J
         { actionId: signed.actionId, retryable: true },
       );
     }
-    receipt = await findKnownReceipt(ctx.client, variants);
+    receipt = await receiptAfterNonceUse(ctx.client, variants, ctx.config);
     if (!receipt)
       return append(
         ctx,

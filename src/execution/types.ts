@@ -931,6 +931,8 @@ export interface WaitForReceiptInput {
   nonce: DecimalString | number;
   pollIntervalMs: number;
   timeoutMs: number;
+  /** The apply's receipt timeout. It limits the wait for a receipt after the nonce shows as used. */
+  receiptTimeoutMs: number;
 }
 
 /** `dead`: another transaction used the nonce and no variant has a receipt. */

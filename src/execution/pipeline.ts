@@ -3,6 +3,7 @@ import { keccak256 } from 'viem';
 import {
   findKnownReceipt,
   nonceConsumed,
+  receiptAfterNonceUse,
   broadcast,
   validateSignedTransaction,
   waitForReceipt,
@@ -291,11 +292,15 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
   ) {
     throw new ApplyError('journal', `Wave ${wave.wave} shares a reservation across signer groups.`);
   }
+  for (const job of jobs)
+    job.receipt = job.signed ? await findKnownReceipt(ctx.client, job.variants) : null;
   const conflict = jobs.find((job) => {
     const last = job.records.at(-1);
     return (
       last?.phase === 'failed' &&
       !last.retryable &&
+      // A lagging RPC node can cause a false conflict for a journaled transaction that is mined.
+      !(last.code === 'nonce-conflict' && job.receipt) &&
       !(
         last.code === 'postcondition' &&
         job.item.planned.action === 'deploy' &&
@@ -313,8 +318,6 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
     throw new ApplyError(failure.code, failure.reason, { actionId: conflict.item.planned.id });
 
   // Check every signer and precondition before adding any signature or broadcast.
-  for (const job of jobs)
-    job.receipt = job.signed ? await findKnownReceipt(ctx.client, job.variants) : null;
   for (const job of jobs) {
     const last = job.records.at(-1);
     if (
@@ -714,7 +717,7 @@ async function preparePipelineBroadcast(
   let receipt = await findKnownReceipt(ctx.client, job.variants);
   if (receipt) return { receipt };
   if (await nonceConsumed(ctx.client, signed.signer, signed.nonce)) {
-    receipt = await findKnownReceipt(ctx.client, job.variants);
+    receipt = await receiptAfterNonceUse(ctx.client, job.variants, ctx.config);
     if (receipt) return { receipt };
     await pipelineConflict(ctx, job);
   }
@@ -789,7 +792,7 @@ async function recordPipelineBroadcast(
         transactionHash: signed.transactionHash,
       });
   } else if (sent.nonceTooLow) {
-    const receipt = await findKnownReceipt(ctx.client, job.variants);
+    const receipt = await receiptAfterNonceUse(ctx.client, job.variants, ctx.config);
     if (receipt) return { receipt };
     await pipelineConflict(ctx, job);
   }
@@ -901,6 +904,7 @@ export async function settlePipelineBatch(
           nonce: job.signed.nonce,
           pollIntervalMs: ctx.config.pollIntervalMs,
           timeoutMs: Math.min(1_000, Math.max(0, deadline - Date.now())),
+          receiptTimeoutMs: ctx.config.receiptTimeoutMs,
         });
         if ('dead' in waited) await pipelineConflict(ctx, job);
         if ('receipt' in waited) {
