@@ -24,6 +24,7 @@ import { output } from './commands/output.ts';
 import { plan } from './commands/plan.ts';
 import { schedule } from './commands/schedule.ts';
 import { status } from './commands/status.ts';
+import { unfinished } from './commands/unfinished.ts';
 import { validate } from './commands/validate.ts';
 import { verify } from './commands/verify.ts';
 import {
@@ -55,6 +56,7 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
   if (options.rebaseline && command !== 'import')
     throw new Error('--rebaseline applies only to import.');
   if (command === 'status') return status({ options });
+  if (command === 'unfinished') return unfinished({ options });
   const specFile = await findSpecFile();
   const config = await loadConfig(specFile, SPEC_COMMANDS);
   const merged = withConfig(options, config, command, COMMANDS[command].options);

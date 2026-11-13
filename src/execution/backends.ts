@@ -3,6 +3,7 @@ import os from 'node:os';
 import { bytesToHex, hexToBytes } from 'viem';
 import { hashJson } from '../identity.ts';
 import { field } from '../json.ts';
+import { liveTransactions } from './journal.ts';
 import { jsonSafe } from './preflight.ts';
 import { classifyLeaseFailure, safeLeaseMessage } from './rpc-error.ts';
 import { validateJournalCreationProof } from '../verification/creation-proof.ts';
@@ -33,6 +34,8 @@ import type {
   OpenStoredJournalInput,
   SignerLockScope,
   StoredJournalRecord,
+  UnfinishedPlan,
+  UnfinishedPlanInput,
 } from './types.ts';
 
 const HASH = /^0x[0-9a-fA-F]{64}$/;
@@ -179,6 +182,38 @@ export async function readStoredJournal(
     }
   }
   return records;
+}
+
+/**
+ * The saved plan that an interrupted apply left unfinished, or null. A remote apply of another plan stops with
+ * `plan-mismatch` while a transaction of this plan is in liveTransactions, so the next runner must apply this plan
+ * again. It decrypts no signed bytes: the phase, the plan and the transaction hash of a record are not encrypted.
+ */
+export async function readUnfinishedPlan({
+  scope,
+  journalStore,
+  planStore,
+}: UnfinishedPlanInput): Promise<UnfinishedPlan | null> {
+  const records = await readStoredJournal(journalStore, scope);
+  const live = liveTransactions(records as unknown as JournalRecord[]);
+  const hashes = [...new Set(live.map(({ latest }) => latest.planHash))];
+  const [planHash, ...others] = hashes;
+  if (planHash === undefined) return null;
+  if (others.length)
+    throw new Error(
+      `Plans ${hashes.join(', ')} each have an unfinished transaction. Resume them one at a time, oldest first.`,
+    );
+  return {
+    planHash,
+    plan: await planStore.read(scope, planHash),
+    transactions: live.map(({ latest, signed }) => ({
+      actionId: latest.actionId,
+      phase: latest.phase,
+      transactionHash: signed.transactionHash,
+      signer: signed.signer,
+      nonce: signed.nonce,
+    })),
+  };
 }
 
 export async function openStoredJournal({

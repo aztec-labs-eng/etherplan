@@ -121,6 +121,10 @@ export const COMMANDS = {
     description: 'Inspect a deployment in the production backend.',
     options: ['plan', 'backend'],
   },
+  unfinished: {
+    description: 'Find the saved plan that an interrupted apply must resume.',
+    options: ['backend', 'out'],
+  },
 };
 const OPTION_HELP = {
   value: 'Value name for impact',
@@ -196,7 +200,7 @@ const BOOLEAN_OPTIONS = new Set([
 ]);
 export const SPEC_COMMANDS = Object.fromEntries(
   Object.entries(COMMANDS)
-    .filter(([name]) => name !== 'status')
+    .filter(([name]) => name !== 'status' && name !== 'unfinished')
     .map(([name, details]) => [name, details.options]),
 );
 
@@ -216,17 +220,19 @@ export function usage(command?: CommandName): string {
   const describe = (name: keyof typeof OPTION_HELP) =>
     name === 'out' && command === 'plan'
       ? 'Local plan file (default: ./plan.json; - skips the local file)'
-      : name === 'out'
-        ? 'Adapter directory (default: ./generated)'
-        : name === 'plan' && command === 'apply'
-          ? 'Saved plan file; omit to create and approve a fresh plan'
-          : name === 'plan' && command === 'status'
-            ? 'Saved plan file (default: ./plan.json)'
-            : OPTION_HELP[name];
+      : name === 'out' && command === 'unfinished'
+        ? 'File for the unfinished saved plan; not written when no plan is unfinished'
+        : name === 'out'
+          ? 'Adapter directory (default: ./generated)'
+          : name === 'plan' && command === 'apply'
+            ? 'Saved plan file; omit to create and approve a fresh plan'
+            : name === 'plan' && command === 'status'
+              ? 'Saved plan file (default: ./plan.json)'
+              : OPTION_HELP[name];
   const environment =
     command === 'apply'
       ? '\n\nRequires ETH_RPC_URL. ETH_VERIFICATION_RPC_URL optionally selects an independent deployment-verification RPC.'
-      : ['init', 'plan', 'verify', 'schedule', 'import'].includes(command)
+      : ['init', 'plan', 'verify', 'schedule', 'import', 'unfinished'].includes(command)
         ? '\n\nRequires ETH_RPC_URL.'
         : command === 'output'
           ? '\n\n--backend requires ETH_RPC_URL.'
@@ -236,7 +242,7 @@ export function usage(command?: CommandName): string {
       ? ' Without --signer-module, local apply reads DEPLOYER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEYS and, for owner calls, OWNER_PRIVATE_KEY.'
       : '';
   const project =
-    command === 'status'
+    command === 'status' || command === 'unfinished'
       ? ''
       : '\nRun from a directory containing main.ethp; all root-level .ethp files form one project.';
   return `Usage: etherplan ${command} [options]\n\n${details.description}${project}\n\nOptions:\n${details.options.map((name) => `  --${name.padEnd(12)} ${describe(name as keyof typeof OPTION_HELP)}`).join('\n')}\n  --help         Show this help${environment}${signers}`;

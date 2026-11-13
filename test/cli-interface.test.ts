@@ -39,6 +39,7 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
     'output',
     'adapters',
     'status',
+    'unfinished',
   ]) {
     assert.match(overview.stdout, new RegExp(`\\b${command}\\b`));
     const help = cli(command, '--help');
@@ -60,6 +61,10 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
     assert.match(cli('apply', '--help').stdout, new RegExp(`--${flag}`));
   }
   assert.match(cli('status', '--help').stdout, /--backend/);
+  assert.match(cli('unfinished', '--help').stdout, /--backend/);
+  assert.match(cli('unfinished', '--help').stdout, /--out.*unfinished saved plan/);
+  assert.match(cli('unfinished', '--help').stdout, /Requires ETH_RPC_URL/);
+  assert.doesNotMatch(cli('unfinished', '--help').stdout, /main\.ethp/);
   assert.match(cli('init', '--help').stdout, /--reconfigure/);
   assert.doesNotMatch(cli('plan', '--help').stdout, /--spec/);
   assert.match(cli('plan', '--help').stdout, /main\.ethp/);
