@@ -36,6 +36,7 @@ export {
   lockScopes,
   openStoredJournal,
   readStoredJournal,
+  readUnfinishedPlan,
   scopeKey,
   validateJournal,
 } from './execution/backends.ts';

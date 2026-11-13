@@ -8,6 +8,7 @@ import {
   encryptionContext,
   openStoredJournal,
   readStoredJournal,
+  readUnfinishedPlan,
   scopeKey,
 } from '../src/execution/backends.ts';
 import { applyPlan } from '../src/execution/index.ts';
@@ -502,6 +503,137 @@ test('a new runner recovers encrypted signed bytes without a file or a second si
   assert.ok(events.some((event) => event.type === 'recovery'));
   assert.ok(events.some((event) => event.type === 'verification' || event.type === 'verified'));
   assert.ok(events.every((event) => !JSON.stringify(event).includes('rawTransaction')));
+});
+
+test('a new runner finds the unfinished saved plan from the journal alone and resumes it', async () => {
+  const localChain = await startAnvil();
+  try {
+    const input = fixture({ withCall: false });
+    input.spec.contracts = input.spec.contracts.slice(0, 1);
+    input.artifacts = new Map([['alpha', input.artifacts.get('alpha')]]);
+    const plan = await createPlan({
+      ...input,
+      client: localChain.client,
+      signers: { deployers: [deployerA.address] },
+      maxSpendWei: '100000000000000000000',
+    });
+    const genesisHash = (await localChain.client.getBlock({ blockNumber: 0n })).hash;
+    const deployment = deploymentScope(
+      { project: 'test', environment: 'dev', label: 'unfinished' },
+      { id: 31337, genesisHash },
+    );
+    const backend = memoryBackend();
+    const plans = new Map([[plan.planHash, plan]]);
+    const reads = [];
+    const planStore = {
+      async put() {
+        throw new Error('The lookup must not save a plan.');
+      },
+      async read(_scope, hash) {
+        reads.push(hash);
+        const saved = plans.get(hash);
+        if (!saved) throw new Error(`No saved plan ${hash}.`);
+        return structuredClone(saved);
+      },
+    };
+    // No journal cipher: the lookup cannot decrypt signed bytes.
+    const lookup = { scope: deployment, journalStore: backend.journalStore, planStore };
+    assert.equal(await readUnfinishedPlan(lookup), null);
+
+    const options = {
+      plan,
+      ...input,
+      client: localChain.client,
+      ...backend,
+      scope: deployment,
+      signerProvider: {
+        async address() {
+          return deployerA.address;
+        },
+        async signTransaction(_role, transaction) {
+          return deployerA.signTransaction(transaction);
+        },
+      },
+      confirmations: 1,
+      pollIntervalMs: 10,
+    };
+    // An apply that stops before its first signature leaves nothing to resume.
+    await assert.rejects(
+      applyPlan({
+        ...options,
+        hooks: {
+          afterRecord(record) {
+            if (record.phase === 'intent') throw new Error('stop before the signature');
+          },
+        },
+      }),
+      /stop before the signature/,
+    );
+    assert.equal(await readUnfinishedPlan(lookup), null);
+
+    let stopped = false;
+    await assert.rejects(
+      applyPlan({
+        ...options,
+        hooks: {
+          afterRecord(record) {
+            if (!stopped && record.phase === 'signed') {
+              stopped = true;
+              throw new Error('simulate runner loss');
+            }
+          },
+        },
+      }),
+      /simulate runner loss/,
+    );
+    const signed = backend.recordsFor(deployment).find((record) => record.phase === 'signed');
+    const found = await readUnfinishedPlan(lookup);
+    assert.equal(found.planHash, plan.planHash);
+    assert.deepEqual(found.plan, plan);
+    assert.deepEqual(found.transactions, [
+      {
+        actionId: 'contract:alpha',
+        phase: 'signed',
+        transactionHash: signed.transactionHash,
+        signer: signed.signer,
+        nonce: signed.nonce,
+      },
+    ]);
+    assert.deepEqual(reads, [plan.planHash]);
+
+    // A second plan with an unfinished transaction has no safe order to resume in.
+    const other = `0x${'cc'.repeat(32)}`;
+    const records = backend.recordsFor(deployment);
+    const foreign = [
+      ...records,
+      ...records
+        .filter((record) => record.sequence >= signed.sequence - 1)
+        .map((record) => ({ ...record, planHash: other })),
+    ];
+    await assert.rejects(
+      readUnfinishedPlan({
+        ...lookup,
+        journalStore: {
+          async *read() {
+            let previousHash = null;
+            for (const [index, record] of foreign.entries()) {
+              const { recordHash: _, ...fields } = { ...record, sequence: index + 1, previousHash };
+              const { hashJson } = await import('../src/identity.ts');
+              previousHash = hashJson(fields);
+              yield { ...fields, recordHash: previousHash };
+            }
+          },
+        },
+      }),
+      /each have an unfinished transaction/,
+    );
+
+    const result = await applyPlan({ ...options, plan: found.plan });
+    assert.equal(result.status, 'applied');
+    assert.equal(await readUnfinishedPlan(lookup), null);
+  } finally {
+    await localChain.stop();
+  }
 });
 
 test('another label cannot spend a signer nonce while its saved signature is unresolved', async () => {
