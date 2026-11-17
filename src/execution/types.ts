@@ -341,6 +341,26 @@ export interface InspectDeploymentInput {
   lockProvider: LockProvider;
 }
 
+export interface UnfinishedPlanInput {
+  scope: DeploymentScope;
+  journalStore: JournalStore;
+  planStore: PlanStore;
+}
+
+/** A saved plan with a transaction that may still reach the chain, from readUnfinishedPlan. */
+export interface UnfinishedPlan {
+  planHash: Hash;
+  plan: Plan;
+  /** The unfinished transactions, with the latest journal phase of each one. */
+  transactions: {
+    actionId: ResourceId;
+    phase: JournalPhase;
+    transactionHash: Hash;
+    signer: Address;
+    nonce: DecimalString;
+  }[];
+}
+
 export interface DeploymentStatus {
   scope: DeploymentScope;
   planHash: Hash | null;

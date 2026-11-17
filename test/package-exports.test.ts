@@ -10,5 +10,6 @@ test('the package exposes only its root library entry', async () => {
 
   const api = await import('etherplan');
   assert.equal(typeof api.applyPlan, 'function');
+  assert.equal(typeof api.readUnfinishedPlan, 'function');
   await assert.rejects(import('etherplan/src/index.js'), { code: 'ERR_PACKAGE_PATH_NOT_EXPORTED' });
 });

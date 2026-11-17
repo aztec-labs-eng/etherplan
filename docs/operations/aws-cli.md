@@ -36,4 +36,13 @@ etherplan status --plan plan.json --backend backend.json
 
 A signer module exports `signerProvider` (and optionally `signerRoles`). It can use `createSignerServiceProvider`, a hardware wallet, or an organization-specific signer. `status` is read-only: it reports lock holder and expiry, active or abandoned lease state, plan hash, last journal phase, sequence, and state version without decrypting signed bytes.
 
+After an interrupted `apply`, the next runner has no local plan file. `unfinished` finds the saved plan to apply again:
+
+```sh
+etherplan unfinished --backend backend.json --out plan.json
+etherplan apply --plan plan.json --backend backend.json --signer-module signer.mjs
+```
+
+`unfinished` reads the journal of the configured scope and reports the plan that has a signed transaction whose latest record is not final: the same transactions that make `apply` refuse another plan with `plan-mismatch`. It prints the scope, the plan hash, and those transactions as JSON, and writes the saved plan from S3 to `--out`. When no plan is unfinished, the plan hash is `null` and no file is written. It stops when more than one plan is unfinished. It is read-only, needs `ETH_RPC_URL` for the chain identity of the scope, does not need the `init` marker, and does not decrypt signed bytes. `apply` still checks the saved plan against the current spec and artifacts, so run it from the commit and with the variables that made the plan.
+
 [Previous: Deployment scope](scope-and-recovery.md) · [Next: KMS transaction signers](kms-signers.md)
