@@ -1,3 +1,4 @@
+import { callTarget } from '../spec/call-target.ts';
 import { concatHex, getContractAddress, isAddress, keccak256 } from 'viem';
 import { hashJson } from '../identity.ts';
 import { graph, parseSpec, resolve, usesDependencyPlan } from '../spec/index.ts';
@@ -149,6 +150,7 @@ function buildContract(
     signerRole: item.signerRole ?? 'deployer',
     senderIndependent: item.senderIndependent ?? false,
   };
+  if (item.identityId) resource.identityId = item.identityId;
   if (Object.keys(libraries).length > 0) resource.libraries = libraries;
   if (item.codeHash !== undefined) resource.expectedCodeHash = item.codeHash;
   if (item.ignoreMetadata) resource.ignoreMetadata = true;
@@ -179,32 +181,57 @@ function buildCall(
   spec: ParsedSpec,
   addresses: ResolvedAddresses,
   contracts: Map<string, PreparedContract>,
+  externals: Map<string, PreparedExternal>,
   describeDependencies: boolean,
 ): PreparedCall {
   const item = node.item;
-  const target = contracts.get(item.target);
-  assert(target, `${node.id} has unresolved target contract:${item.target}.`);
+  const info = callTarget(item.target);
+  const target = info.id.startsWith('external:')
+    ? externals.get(info.name)
+    : contracts.get(info.name);
+  assert(target, `${node.id} has unresolved target ${info.id}.`);
+  const child =
+    info.getter && target.kind === 'contract'
+      ? target.createdCode?.find((entry) => entry.getter === info.getter)
+      : undefined;
+  assert(!info.getter || child, `${node.id} has no pinned created getter ${info.getter}.`);
+  const abi = item.abi ?? (target.kind === 'contract' ? target.artifact.abi : target.abi);
+  assert(abi, `${node.id} target needs an ABI.`);
   const checkArgs = resolve(item.check.args, spec, addresses);
+  const checkAddress =
+    item.check.address === undefined ? undefined : resolve(item.check.address, spec, addresses);
+  assert(
+    checkAddress === undefined || (typeof checkAddress === 'string' && isAddress(checkAddress)),
+    `${node.id} has an invalid check address.`,
+  );
+  const checkAt = checkAddress === undefined ? {} : { address: checkAddress as Address };
   const after: PreparedBinding = {
+    ...checkAt,
     functionName: item.check.function,
     args: checkArgs,
     expected: resolve(item.check.equals, spec, addresses),
   };
   const before: PreparedBinding = {
+    ...checkAt,
+    ...(item.before.absent ? { absent: true as const } : {}),
     functionName: item.check.function,
     args: checkArgs,
-    expected: resolve(item.before.equals, spec, addresses),
+    expected: item.before.absent ? null : resolve(item.before.equals!, spec, addresses),
   };
-  const check: PreparedCallCheck = { functionName: item.check.function, args: checkArgs };
+  const check: PreparedCallCheck = {
+    ...checkAt,
+    functionName: item.check.function,
+    args: checkArgs,
+  };
   const resource: PreparedCall = {
     id: node.id,
     kind: 'call',
     dependencies: [...node.dependencies].sort(),
     ...dependencyFields(node, describeDependencies),
-    address: target.address,
+    address: child ? child.address : target.address,
     targetId: target.id,
-    targetArtifact: target.artifact,
-    abi: target.artifact.abi,
+    ...(target.kind === 'contract' ? { targetArtifact: target.artifact } : {}),
+    abi,
     method: item.method,
     args: resolve(item.args, spec, addresses),
     check,
@@ -238,16 +265,19 @@ export function prepareResources(
   const addresses: ResolvedAddresses = {};
   const resources: PreparedResource[] = [];
   const contracts = new Map<string, PreparedContract>();
+  const externals = new Map<string, PreparedExternal>();
 
   for (const node of ordered) {
     if (node.kind === 'external') {
-      resources.push(buildExternal(node, spec, addresses, describeDependencies));
+      const resource = buildExternal(node, spec, addresses, describeDependencies);
+      externals.set(node.id.slice('external:'.length), resource);
+      resources.push(resource);
     } else if (node.kind === 'contract') {
       const resource = buildContract(node, spec, addresses, artifacts, describeDependencies);
       contracts.set(node.item.id, resource);
       resources.push(resource);
     } else {
-      resources.push(buildCall(node, spec, addresses, contracts, describeDependencies));
+      resources.push(buildCall(node, spec, addresses, contracts, externals, describeDependencies));
     }
   }
 

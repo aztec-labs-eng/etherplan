@@ -1,3 +1,4 @@
+import { callTarget } from './call-target.ts';
 import { isAddress } from 'viem';
 import { assertDerivedSalt, assertSaltDerivation } from './salt.ts';
 import type { ContractId, DistributiveOmit, Hash, JsonValue, ResourceId } from '../types.ts';
@@ -19,7 +20,7 @@ export const DEFAULT_FACTORY: Factory = {
 };
 
 const ID = /^[a-z][a-zA-Z0-9_]*$/;
-const ROLE = /^[a-z][a-z0-9_-]*$/;
+const ROLE = /^[a-z][a-zA-Z0-9_-]*$/;
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const SECRET_KEY = /^(private[_-]?key|secret[_-]?key|mnemonic|seed[_-]?phrase|passphrase)$/i;
 
@@ -325,26 +326,32 @@ export function parseSpec(raw: unknown): ParsedSpec {
     typeof spec.chainId === 'number' && Number.isSafeInteger(spec.chainId) && spec.chainId > 0,
     'Spec needs a positive numeric chainId.',
   );
-  assert(
-    Array.isArray(spec.contracts) && spec.contracts.length > 0,
-    'Spec needs a nonempty contracts array.',
-  );
+  assert(Array.isArray(spec.contracts), 'Spec needs a contracts array.');
   spec.values ??= {};
   spec.externals ??= {};
   spec.calls ??= [];
   assert(isObject(spec.values), 'Spec values must be an object.');
   assert(isObject(spec.externals), 'Spec externals must be an object.');
   assert(Array.isArray(spec.calls), 'Spec calls must be an array.');
+  assert(
+    spec.contracts.length + spec.calls.length + Object.keys(spec.externals).length > 0,
+    'Spec needs at least one resource.',
+  );
 
   for (const name of Object.keys(spec.values)) assertId(name, `Value name ${name}`);
   for (const [name, external] of Object.entries(spec.externals)) {
     assertId(name, `External name ${name}`);
     assert(isObject(external), `External ${name} must be an object.`);
-    assertKeys(external, new Set(['address', 'codeHash', 'checks', 'abi']), `External ${name}`);
+    assertKeys(
+      external,
+      new Set(['address', 'codeHash', 'checks', 'abi', 'after']),
+      `External ${name}`,
+    );
     assert(
       typeof external.address === 'string' && isAddress(external.address),
       `External ${name} needs an address.`,
     );
+    if (external.after !== undefined) assertAfter(external.after, `External ${name}`);
     if (external.codeHash !== undefined) assertHash(external.codeHash, `External ${name} codeHash`);
     if (external.checks !== undefined) assertChecks(external.checks, `External ${name} checks`);
     if (external.abi !== undefined)
@@ -371,6 +378,7 @@ export function parseSpec(raw: unknown): ParsedSpec {
         'codeHash',
         'creationProofMode',
         'createdCode',
+        'identityId',
         'signerRole',
         'senderIndependent',
         'ignoreMetadata',
@@ -378,6 +386,12 @@ export function parseSpec(raw: unknown): ParsedSpec {
       `Contract ${item.id ?? '<unknown>'}`,
     );
     assertId(item.id, 'Contract ID');
+    if (item.identityId !== undefined)
+      assert(
+        typeof item.identityId === 'string' &&
+          /^contract:[a-z][a-zA-Z0-9_]*$/.test(item.identityId),
+        'Contract identityId must be a contract ID.',
+      );
     const fullId = `contract:${item.id}`;
     assert(!ids.has(fullId), `Duplicate ${fullId}.`);
     ids.add(fullId);
@@ -492,6 +506,7 @@ export function parseSpec(raw: unknown): ParsedSpec {
       new Set([
         'id',
         'target',
+        'abi',
         'method',
         'args',
         'check',
@@ -507,14 +522,23 @@ export function parseSpec(raw: unknown): ParsedSpec {
     const fullId = `call:${item.id}`;
     assert(!ids.has(fullId), `Duplicate ${fullId}.`);
     ids.add(fullId);
-    assert(
-      typeof item.target === 'string' && ID.test(item.target),
-      `${fullId} needs a valid target contract ID.`,
-    );
+    assert(typeof item.target === 'string', `${fullId} needs a call target.`);
+    const target = callTarget(item.target);
+    if (target.getter) {
+      const parent = (spec.contracts as unknown as SpecContract[]).find(
+        (contract) => contract.id === target.name,
+      );
+      assert(
+        parent?.createdCode?.some((child) => child.getter === target.getter),
+        `${fullId} names an undeclared created getter ${item.target}.`,
+      );
+      assert(Array.isArray(item.abi), `${fullId} needs the created child's ABI.`);
+    }
+    if (item.abi !== undefined) assert(Array.isArray(item.abi), `${fullId} abi must be an array.`);
     assert(typeof item.method === 'string' && item.method.length > 0, `${fullId} needs a method.`);
     assert(Array.isArray(item.args), `${fullId} needs args.`);
     assert(isObject(item.check), `${fullId} needs a check predicate.`);
-    assertKeys(item.check, new Set(['function', 'args', 'equals']), `${fullId} check`);
+    assertKeys(item.check, new Set(['function', 'args', 'equals', 'address']), `${fullId} check`);
     assert(
       typeof item.check.function === 'string' &&
         item.check.function.length > 0 &&
@@ -524,8 +548,16 @@ export function parseSpec(raw: unknown): ParsedSpec {
     item.check.args ??= [];
     assert(Array.isArray(item.check.args), `${fullId} check.args must be an array.`);
     assert(isObject(item.before), `${fullId} needs a before predicate.`);
-    assertKeys(item.before, new Set(['equals']), `${fullId} before`);
-    assert(Object.hasOwn(item.before, 'equals'), `${fullId} needs before.equals.`);
+    assertKeys(item.before, new Set(['equals', 'absent']), `${fullId} before`);
+    assert(
+      Object.hasOwn(item.before, 'equals') !== Object.hasOwn(item.before, 'absent'),
+      `${fullId} needs before.equals or before.absent.`,
+    );
+    if (Object.hasOwn(item.before, 'absent'))
+      assert(
+        item.before.absent === true && Object.hasOwn(item.check, 'address'),
+        `${fullId} before.absent needs a check address.`,
+      );
     if (item.after !== undefined) assertAfter(item.after, `${fullId} after`);
     if (item.signerRole !== undefined)
       assert(
@@ -660,11 +692,11 @@ export function graph(spec: ParsedSpec): OrderedNode[] {
       }
     }
     if (node.kind === 'call') {
-      const target: ContractId = `contract:${node.item.target}`;
+      const target = callTarget(node.item.target).id;
       addEdge(resolution, target, 'call target address');
       addEdge(execution, target, 'live call target');
     }
-    const after = node.kind === 'external' ? undefined : node.item.after;
+    const after = node.item.after;
     for (const dependency of after ?? []) addEdge(execution, dependency, 'explicit after');
     if (
       node.kind === 'call' &&

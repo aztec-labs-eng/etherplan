@@ -122,3 +122,10 @@ export type {
   StateStore,
   StoredJournalRecord,
 } from './execution/types.ts';
+
+export { createWorkspacePlan, applyWorkspacePlan } from './workspace/index.ts';
+export type * from './workspace/types.ts';
+
+export { hashJson } from './identity.ts';
+export { loadArtifacts } from './artifacts.ts';
+export { loadSpec } from './input/project.ts';

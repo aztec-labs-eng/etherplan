@@ -14,6 +14,7 @@ import {
 import type { VariableValue } from '../input/variables.ts';
 import { graph } from '../spec/index.ts';
 import { adapters } from './commands/adapters.ts';
+import { workspaceCommand } from './commands/workspace.ts';
 import { apply } from './commands/apply.ts';
 import { compile } from './commands/compile.ts';
 import { graphCommand } from './commands/graph.ts';
@@ -57,6 +58,12 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
     throw new Error('--rebaseline applies only to import.');
   if (command === 'status') return status({ options });
   if (command === 'unfinished') return unfinished({ options });
+  if (command === 'plan' && options['workspace-manifest'])
+    return workspaceCommand(command, options);
+  if (command === 'apply' && options.plan) {
+    const saved = JSON.parse(await readFile(path.resolve(options.plan), 'utf8'));
+    if (saved.workspace) return workspaceCommand(command, options, saved);
+  }
   const specFile = await findSpecFile();
   const config = await loadConfig(specFile, SPEC_COMMANDS);
   const merged = withConfig(options, config, command, COMMANDS[command].options);

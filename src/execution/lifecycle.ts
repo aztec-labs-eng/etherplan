@@ -1,5 +1,5 @@
 import { hashJson } from '../identity.ts';
-import { createSchedule } from '../scheduling/index.ts';
+import { createSchedule, normalizeNamedSigners } from '../scheduling/index.ts';
 import { preflight } from './preflight.ts';
 import { ApplyError } from './errors.ts';
 import { isRpcError, safeRpcMessage } from './rpc-error.ts';
@@ -23,7 +23,7 @@ import {
 import { prepareBatch, signBatch, settleBatch } from './batch.ts';
 import { checkBatchFunding } from './funding.ts';
 import { report, summary } from './report.ts';
-import { openApplyContext } from './context.ts';
+import { openApplyContext, type RuntimeFactory } from './context.ts';
 import type { Address } from '../types.ts';
 import type { ScheduleEntry } from '../scheduling/types.ts';
 import type { StateFile } from '../state/types.ts';
@@ -156,6 +156,11 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
     );
   const deployers = ctx.lanes.pool.map((account) => account.address.toLowerCase() as Address);
   const pinned = ctx.plan.pipeline ?? ctx.plan.signers;
+  const named = normalizeNamedSigners(
+    Object.fromEntries(
+      Object.entries(ctx.lanes.named).map(([role, account]) => [role, account.address]),
+    ),
+  );
   const owner =
     ctx.pipeline || ownerActions.length || pinned?.owner
       ? ((ctx.lanes.owner?.address.toLowerCase() as Address) ?? null)
@@ -182,6 +187,7 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
     pinned &&
     (hashJson(deployers) !== hashJson(pinned.deployers) ||
       owner !== pinned.owner ||
+      hashJson(named) !== hashJson(pinned.named ?? {}) ||
       ctx.parallel !== pinned.parallel)
   ) {
     throw new ApplyError(
@@ -191,6 +197,7 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
   }
   ctx.schedule = createSchedule(ctx.plan, deployers, {
     owner,
+    named,
     parallel: ctx.parallel,
     pipeline: ctx.pipeline,
   });
@@ -255,7 +262,14 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
 
 // Applies a pinned plan under one writer lock, with a durable journal record before every broadcast.
 export async function applyPlan(input: ApplyInput): Promise<ApplyResult> {
-  const { ctx, lockStarted, close } = await openApplyContext(input);
+  return applyWithRuntime(input);
+}
+
+export async function applyWithRuntime(
+  input: ApplyInput,
+  runtimeFactory?: RuntimeFactory,
+): Promise<ApplyResult> {
+  const { ctx, lockStarted, close } = await openApplyContext(input, runtimeFactory);
   try {
     await report(ctx, 'lock-acquisition', {
       holder: ctx.lock.holder,

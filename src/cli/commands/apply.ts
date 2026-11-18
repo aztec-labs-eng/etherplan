@@ -95,6 +95,12 @@ export async function apply(context: ChainCommandContext): Promise<void> {
       : {
           deployers: signerSource.signers.deployer.map((account) => account.address),
           owner: signerSource.signers.owner?.address ?? null,
+          named: Object.fromEntries(
+            Object.entries(signerSource.signers.named ?? {}).map(([role, account]) => [
+              role,
+              account.address,
+            ]),
+          ),
         };
     const journalRecords = await planningJournal(stateFile, options, planningBackend);
     plan = await createPlan({
@@ -163,6 +169,10 @@ export async function apply(context: ChainCommandContext): Promise<void> {
 function capBudgets(plan: Plan, cap: string): Record<string, string> {
   const signers = plan.pipeline ?? plan.signers;
   if (!signers) return {};
-  const addresses = signers.owner ? [...signers.deployers, signers.owner] : signers.deployers;
+  const addresses = [
+    ...signers.deployers,
+    ...(signers.owner ? [signers.owner] : []),
+    ...Object.values(signers.named ?? {}),
+  ];
   return Object.fromEntries(addresses.map((address) => [address, cap]));
 }

@@ -75,24 +75,38 @@ export async function assertSignerHistory(
 ): Promise<void> {
   const { journalStore, scope } = ctx;
   if (!ctx.remote) {
-    if (!ctx.journal.file)
+    if (!ctx.journal.file && !ctx.ownedJournalFiles?.length)
       throw new ApplyError('config', 'Local signer history needs a journal file.');
-    const current = await canonicalLocalFile(ctx.journal.file);
+    const owned = new Set(
+      await Promise.all((ctx.ownedJournalFiles ?? [ctx.journal.file!]).map(canonicalLocalFile)),
+    );
+    const current = ctx.journal.file ? await canonicalLocalFile(ctx.journal.file) : null;
     for (const address of new Set(addresses.map((value) => value.toLowerCase() as Address))) {
-      const files = new Set([...(await localSignerJournals(ctx.plan.chain, address)), current]);
+      const files = new Set([...(await localSignerJournals(ctx.plan.chain, address)), ...owned]);
       for (const file of files) {
         await assertLocalJournalSettled(
           ctx,
           file,
           address,
-          file === current ? ctx.journal.records : null,
-          file === current ? activeSignatures : new Set(),
+          file === current
+            ? ctx.journal.records
+            : owned.has(file)
+              ? await readLocalJournal(file)
+              : null,
+          owned.has(file) ? activeSignatures : new Set(),
         );
       }
     }
     return;
   }
   if (!journalStore || !scope) return;
+  const ownedScope = (entry: SignedIndexEntry) =>
+    (ctx.ownedScopes ?? [scope]).some(
+      (value) =>
+        value.project === entry.project &&
+        value.environment === entry.environment &&
+        value.label === entry.label,
+    );
   const scopeRecords = new Map<string, StoredJournalRecord[]>();
   const priorJournal = async (entry: SignedIndexEntry): Promise<StoredJournalRecord[]> => {
     const priorScope = deploymentScope(
@@ -180,9 +194,7 @@ export async function assertSignerHistory(
         );
       }
       const activeCurrent =
-        first.project === scope.project &&
-        first.environment === scope.environment &&
-        first.label === scope.label &&
+        ownedScope(first) &&
         first.planHash.toLowerCase() === ctx.plan.planHash.toLowerCase() &&
         signed.every((record) => activeSignatures.has(record.transactionHash.toLowerCase()));
       if (activeCurrent) continue;
@@ -204,10 +216,7 @@ export async function assertSignerHistory(
         );
       }
       const samePlan =
-        first.project === scope.project &&
-        first.environment === scope.environment &&
-        first.label === scope.label &&
-        first.planHash.toLowerCase() === ctx.plan.planHash.toLowerCase();
+        ownedScope(first) && first.planHash.toLowerCase() === ctx.plan.planHash.toLowerCase();
       await stableReceipt(
         ctx,
         mined.signed.transactionHash,

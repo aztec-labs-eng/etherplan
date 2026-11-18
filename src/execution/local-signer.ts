@@ -69,11 +69,37 @@ async function save(file: string, value: string[]): Promise<void> {
 export async function acquireLocalSignerLocks(
   chain: ChainIdentity,
   addresses: Address[],
-  journalFile: string,
+  journalFile: string | null,
   planHash: string | null,
 ): Promise<LocalLock[]> {
-  const canonicalJournal = await canonicalLocalFile(journalFile);
+  const canonicalJournal = journalFile === null ? null : await canonicalLocalFile(journalFile);
+  if (canonicalJournal) await registerJournalFile(canonicalJournal);
   await mkdir(root(), { recursive: true, mode: 0o700 });
+  const files = [...new Set(addresses.map((address) => registry(chain, address)))].sort();
+  const locks: LocalLock[] = [];
+  try {
+    for (const file of files) locks.push(await acquireLock(`${file}.lock`, { planHash }));
+    for (const file of files) {
+      if (canonicalJournal) {
+        const known = await paths(file);
+        if (!known.includes(canonicalJournal)) await save(file, [...known, canonicalJournal]);
+      }
+    }
+    return locks;
+  } catch (error) {
+    for (const lock of locks.reverse()) await lock.release();
+    throw error;
+  }
+}
+
+export async function localSignerJournals(
+  chain: ChainIdentity,
+  address: Address,
+): Promise<string[]> {
+  return paths(registry(chain, address));
+}
+
+async function registerJournalFile(canonicalJournal: string): Promise<void> {
   // Publish an empty durable journal before registering its path. A crash
   // between registration and openJournal must not leave an ambiguous missing
   // file, while deletion after registration remains a fail-closed error.
@@ -90,24 +116,18 @@ export async function acquireLocalSignerLocks(
   } finally {
     await journalDirectory.close();
   }
-  const files = [...new Set(addresses.map((address) => registry(chain, address)))].sort();
-  const locks: LocalLock[] = [];
-  try {
-    for (const file of files) locks.push(await acquireLock(`${file}.lock`, { planHash }));
-    for (const file of files) {
-      const known = await paths(file);
-      if (!known.includes(canonicalJournal)) await save(file, [...known, canonicalJournal]);
-    }
-    return locks;
-  } catch (error) {
-    for (const lock of locks.reverse()) await lock.release();
-    throw error;
-  }
 }
 
-export async function localSignerJournals(
+export async function registerLocalSignerJournal(
   chain: ChainIdentity,
-  address: Address,
-): Promise<string[]> {
-  return paths(registry(chain, address));
+  addresses: Address[],
+  journalFile: string,
+): Promise<void> {
+  const file = await canonicalLocalFile(journalFile);
+  await registerJournalFile(file);
+  for (const address of new Set(addresses)) {
+    const target = registry(chain, address);
+    const known = await paths(target);
+    if (!known.includes(file)) await save(target, [...known, file]);
+  }
 }

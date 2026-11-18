@@ -13,6 +13,8 @@ export type CliOptions = {
   'creation-tx'?: Hash;
   deployers?: string;
   owner?: Address;
+  'named-signers'?: string;
+  'workspace-manifest'?: string;
   'max-spend-wei'?: string;
   'max-fee-per-gas'?: string;
   'priority-fee-per-gas'?: string;
@@ -59,6 +61,7 @@ export const COMMANDS = {
   plan: {
     description: 'Inspect the chain and save a reviewable plan.',
     options: [
+      'workspace-manifest',
       'out',
       'state',
       'journal',
@@ -67,6 +70,7 @@ export const COMMANDS = {
       'pipeline',
       'deployers',
       'owner',
+      'named-signers',
       'parallel',
       'max-spend-wei',
       ...INPUTS,
@@ -103,7 +107,17 @@ export const COMMANDS = {
   },
   schedule: {
     description: 'Preview signer assignments and execution waves.',
-    options: ['plan', 'state', 'backend', 'deployers', 'owner', 'parallel', 'pipeline', ...INPUTS],
+    options: [
+      'plan',
+      'state',
+      'backend',
+      'deployers',
+      'owner',
+      'named-signers',
+      'parallel',
+      'pipeline',
+      ...INPUTS,
+    ],
   },
   import: {
     description: 'Record a verified existing contract in local state.',
@@ -140,6 +154,8 @@ const OPTION_HELP = {
   reconfigure: 'Accept a changed backend configuration for this project',
   deployers: 'Comma-separated deployer addresses',
   owner: 'Owner signer address for planning or scheduling',
+  'workspace-manifest': 'JSON manifest of project/workspace units and cross-unit links',
+  'named-signers': 'JSON object mapping named signer roles to addresses',
   'max-spend-wei': 'Reviewed maximum total cost in wei per signer for a write plan',
   'max-fee-per-gas':
     'Maximum fee per gas in wei for new transactions (default: --base-fee-multiplier times the base fee, plus the priority fee)',
@@ -166,6 +182,7 @@ const OPTION_HELP = {
     'Workspace for separate state and main.<name>.ethpvars (default: ETHP_WORKSPACE or default)',
 };
 const VALUE_OPTIONS = new Set([
+  'workspace-manifest',
   'value',
   'out',
   'plan',
@@ -177,6 +194,7 @@ const VALUE_OPTIONS = new Set([
   'creation-tx',
   'deployers',
   'owner',
+  'named-signers',
   'max-spend-wei',
   'max-fee-per-gas',
   'priority-fee-per-gas',
@@ -298,9 +316,12 @@ export function validateOptions(command: CommandName, options: CliOptions): void
 // Checks option combinations after .ethpconfig options are merged in.
 export function validateCombination(command: CommandName, options: CliOptions): void {
   if (command === 'plan') {
-    if (options['signer-module'] && (options.deployers || options.owner))
+    if (
+      options['signer-module'] &&
+      (options.deployers || options.owner || options['named-signers'])
+    )
       throw new UsageError(
-        'plan --signer-module supplies signer addresses; omit --deployers and --owner.',
+        'plan --signer-module supplies signer addresses; omit --deployers, --owner, and --named-signers.',
       );
     if (options.pipeline && !options.deployers && !options['signer-module'])
       throw new UsageError(

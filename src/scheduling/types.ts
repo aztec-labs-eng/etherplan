@@ -36,20 +36,21 @@ export interface SchedulePlan {
 
 export interface ScheduleOptions {
   owner?: string | null;
+  named?: Record<string, string>;
   /** Defaults to `true` here; the CLI and applyPlan pass an explicit value. */
   parallel?: boolean;
   pipeline?: boolean;
 }
 
 /** The only roles with a lane. Any other spec `signerRole` makes createSchedule throw. */
-export type LaneRole = 'deployer' | 'owner';
+export type LaneRole = string;
 
 /** A lowercase signer address, or the literal `owner` when owner actions exist and no owner address was supplied. */
 export type Lane = Address | 'owner';
 
 export interface ScheduleEntry {
   id: ResourceId;
-  action: 'deploy' | 'call';
+  action: 'deploy' | 'call' | 'verify';
   kind: ResourceKind;
   address: Address;
   signerRole: LaneRole;
@@ -82,7 +83,7 @@ export interface ScheduleLane {
 
 export interface OwnerAction {
   id: ResourceId;
-  action: 'deploy' | 'call';
+  action: 'deploy' | 'call' | 'verify';
   wave: number;
   signer: Lane;
 }

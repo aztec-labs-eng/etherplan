@@ -9,6 +9,7 @@ Part of [CLI reference](index.md).
 | `DEPLOYER_PRIVATE_KEY` | One local deployer key for `apply`. |
 | `DEPLOYER_PRIVATE_KEYS` | One or more comma-separated local deployer keys for `apply`; takes precedence over the singular form. |
 | `OWNER_PRIVATE_KEY` | Local owner key when planned actions need an owner signer. |
+| `NAMED_SIGNER_PRIVATE_KEYS` | JSON object mapping named roles to local private keys for apply. |
 | `ETHP_WORKSPACE` | Workspace name when `--workspace` is omitted; default is `default`. |
 | `ETHP_VAR_<name>` | Value for a declared HCL variable, overridden by vars files and `--var`. |
 

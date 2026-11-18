@@ -6,6 +6,7 @@ Local state and journals suit one host. For apply runners on different hosts tha
 - [AWS CLI setup](aws-cli.md): configure and initialize DynamoDB, S3, and KMS.
 - [KMS transaction signers](kms-signers.md): signer modules and permissions.
 - [AWS permissions](permissions.md): resource access for each runner role.
+- [Workspace plans](workspace-plans.md): one execution graph across project and workspace pairs.
 - [Programmatic apply](programmatic-apply.md): integrate custom backends and signer services.
 
 Start with [plan and apply](../deploy/index.md) for the ordinary CLI flow.
