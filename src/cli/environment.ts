@@ -1,3 +1,4 @@
+import { normalizeNamedSigners } from '../scheduling/index.ts';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -181,10 +182,30 @@ export function signersFromEnvironment(): Signers {
   const keys = encoded.split(',').map((key) => key.trim());
   if (!keys.every(isPrivateKey))
     throw new Error('DEPLOYER_PRIVATE_KEYS contains an invalid private key.');
+  let namedKeys: unknown;
+  try {
+    namedKeys = JSON.parse(process.env.NAMED_SIGNER_PRIVATE_KEYS ?? '{}');
+  } catch {
+    throw new Error('NAMED_SIGNER_PRIVATE_KEYS must be a JSON object.');
+  }
+  if (
+    !namedKeys ||
+    typeof namedKeys !== 'object' ||
+    Array.isArray(namedKeys) ||
+    Object.values(namedKeys).some((key) => typeof key !== 'string' || !isPrivateKey(key))
+  )
+    throw new Error('NAMED_SIGNER_PRIVATE_KEYS must map roles to valid private keys.');
+  const named = Object.fromEntries(
+    Object.entries(namedKeys).map(([role, key]) => [role, privateKeyToAccount(key as Hex)]),
+  );
+  normalizeNamedSigners(
+    Object.fromEntries(Object.entries(named).map(([role, account]) => [role, account.address])),
+  );
   const ownerKey = process.env.OWNER_PRIVATE_KEY;
   if (ownerKey && !isPrivateKey(ownerKey)) throw new Error('OWNER_PRIVATE_KEY is invalid.');
   return {
     deployer: keys.map((key) => privateKeyToAccount(key as Hex)),
+    ...(Object.keys(named).length ? { named } : {}),
     ...(ownerKey ? { owner: privateKeyToAccount(ownerKey as Hex) } : {}),
   };
 }
@@ -245,7 +266,7 @@ export async function signerFromModule(file: string): Promise<SignerModuleSource
 export async function addressesFromModule(
   source: SignerModuleSource,
   needsOwner: boolean,
-): Promise<{ deployers: Address[]; owner: Address | null }> {
+): Promise<{ deployers: Address[]; owner: Address | null; named?: Record<string, Address> }> {
   const roles = source.signerRoles ?? {};
   const address = async (role: string): Promise<Address> => {
     try {
@@ -254,8 +275,18 @@ export async function addressesFromModule(
       throw new Error(`Signer address request failed: ${safeExternalError(error)}`);
     }
   };
+  const named = Object.fromEntries(
+    await Promise.all(
+      Object.entries(roles.named ?? {}).map(async ([role, key]) => [role, await address(key)]),
+    ),
+  );
   return {
+    ...(Object.keys(named).length ? { named: normalizeNamedSigners(named) } : {}),
     deployers: await Promise.all((roles.deployer ?? ['deployer']).map(address)),
     owner: needsOwner ? await address(roles.owner ?? 'owner') : null,
   };
+}
+
+export function namedSigners(value: string | undefined): Record<string, Address> {
+  return normalizeNamedSigners(value === undefined ? {} : JSON.parse(value));
 }

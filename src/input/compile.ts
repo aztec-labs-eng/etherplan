@@ -74,6 +74,7 @@ const EXTERNAL_FIELDS: FieldMap = {
   abi: ['abi', 'constant'],
 };
 const CALL_FIELDS: FieldMap = {
+  abi: ['abi', 'constant'],
   target: ['target', 'target'],
   method: ['method', 'constant'],
   args: ['args', 'value'],
@@ -110,6 +111,7 @@ const EXTERNAL_ORDER = ['address', 'codeHash', 'abi', 'checks'];
 const CALL_ORDER = [
   'id',
   'target',
+  'abi',
   'method',
   'args',
   'check',
@@ -122,7 +124,14 @@ const CALL_ORDER = [
 const TOP_ATTRIBUTES = new Set(['chain_id', 'dependency_mode', 'execution_assumptions', 'mixer']);
 const TOP_BLOCKS = new Set(['resource', 'factory', 'variable', 'locals']);
 const ASSUMPTION_FIELDS = ['consumer', 'location', 'reference', 'reason'];
-const CALL_CHECK_FIELDS = new Set(['getter', 'args', 'before', 'equals']);
+const CALL_CHECK_FIELDS = new Set([
+  'getter',
+  'args',
+  'before',
+  'before_absent',
+  'address',
+  'equals',
+]);
 // Getter names a getter-list check cannot use; enabled is the block's meta-argument there.
 const RESERVED_GETTERS = new Set(['getter', 'args', 'before', 'equals', 'after']);
 
@@ -270,7 +279,8 @@ function checkShape(block: HclBlock, { root, id }: Target): void {
       );
     }
     assert(
-      ['getter', 'before', 'equals'].every((field) => attributes.has(field)),
+      ['getter', 'equals'].every((field) => attributes.has(field)) &&
+        attributes.has('before') !== attributes.has('before_absent'),
       block,
       `${what} targets a call and needs getter, before, and equals.`,
     );
@@ -323,11 +333,16 @@ function foldCheck(
     );
     call.checkBlock = name;
     call.check = {
+      ...(attributes.has('address')
+        ? { address: evaluator.value(get('address')!, 'address') }
+        : {}),
       function: evaluator.constant(get('getter')!, 'getter'),
       args: attributes.has('args') ? evaluator.value(get('args')!, 'args') : [],
       equals: evaluator.value(get('equals')!, 'equals'),
     };
-    call.before = { equals: evaluator.value(get('before')!, 'before') };
+    call.before = attributes.has('before_absent')
+      ? { absent: evaluator.constant(get('before_absent')!, 'before_absent') }
+      : { equals: evaluator.value(get('before')!, 'before') };
     return;
   }
   let getters: [string, HclExpression, Located][];
@@ -498,6 +513,7 @@ export function compileProject(
     what: string,
     local?: string,
     salt?: (node: Located) => void,
+    createdTarget = false,
   ) =>
     checkReferences(
       node,
@@ -512,6 +528,7 @@ export function compileProject(
         }
       },
       salt,
+      createdTarget,
     );
   for (const attribute of document.attributes.values()) {
     const { value } = attribute;
@@ -522,7 +539,8 @@ export function compileProject(
       }
     } else check(value, attribute.name);
   }
-  for (const [name, attribute] of locals) check(attribute.value, `local.${name}`, name);
+  for (const [name, attribute] of locals)
+    check(attribute.value, `local.${name}`, name, undefined, true);
   for (const block of [
     ...document.blocks.filter((item) => item.type === 'resource'),
     ...factories,
@@ -534,6 +552,7 @@ export function compileProject(
         attribute.name,
         undefined,
         contract && attribute.name === 'salt' ? (node) => derives.push(node) : undefined,
+        block.type === 'resource' && block.labels[0] === 'call' && attribute.name === 'target',
       );
     }
   }
@@ -648,7 +667,7 @@ export function compileProject(
         };
       });
     },
-    target: (node, name) => evaluator.resource(node, name, ['contracts']).name,
+    target: (node, name) => evaluator.callTarget(node, name),
     after: (node, name) =>
       evaluator
         .resources(node, name, ['contracts', 'externals', 'calls'])

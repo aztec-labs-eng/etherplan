@@ -87,6 +87,7 @@ export interface SaltDerivation {
 }
 
 export interface SpecCallCheck {
+  address?: SpecValue;
   function: string;
   /** Defaults to `[]` in parseSpec. */
   args: SpecValue[];
@@ -94,13 +95,15 @@ export interface SpecCallCheck {
 }
 
 export interface SpecCall {
+  /** Required for calls on constructor-created children; optional explicit ABI for other targets. */
+  abi?: Abi;
   id: string;
   /** Contract name without the `contract:` prefix. */
   target: string;
   method: string;
   args: SpecValue[];
   check: SpecCallCheck;
-  before: { equals: SpecValue };
+  before: { equals?: SpecValue; absent?: true };
   after?: ResourceId[];
   signerRole?: string;
   ownerOnly?: boolean;

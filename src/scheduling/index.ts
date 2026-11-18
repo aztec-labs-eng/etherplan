@@ -71,14 +71,35 @@ export function executionWaves(resources: SchedulableResource[]): ExecutionWaves
   };
 }
 
+export function normalizeNamedSigners(named: Record<string, string> = {}): Record<string, Address> {
+  assert(
+    named !== null && typeof named === 'object' && !Array.isArray(named),
+    'Named signers must be an object.',
+  );
+  return Object.fromEntries(
+    Object.entries(named)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([role, address]) => {
+        assert(
+          /^[a-z][a-zA-Z0-9_-]*$/.test(role) && !['deployer', 'owner'].includes(role),
+          `Invalid named signer role ${role}.`,
+        );
+        assert(isUserAddress(address), `Named signer ${role} needs a valid address.`);
+        return [role, address.toLowerCase() as Address];
+      }),
+  );
+}
+
 function laneFor(
   resource: SchedulableResource,
   primary: Address,
   owner: Address | null,
+  named: Record<string, Address>,
 ): { role: LaneRole; lane: Lane } {
   const role = resource.signerRole ?? (resource.kind === 'call' ? 'owner' : 'deployer');
   if (role === 'deployer') return { role, lane: primary };
   if (role === 'owner') return { role, lane: owner ?? OWNER_LANE };
+  if (Object.hasOwn(named, role)) return { role, lane: named[role]! };
   throw new Error(`${resource.id} needs signer role ${role}, which has no lane.`);
 }
 
@@ -146,6 +167,7 @@ export function createSchedule(
     owner === null || isUserAddress(owner),
     'Owner must be an Ethereum address with a valid mixed-case checksum.',
   );
+  const named = normalizeNamedSigners(options.named);
   const ownerLane = owner === null ? null : (owner.toLowerCase() as Address);
   const blocked = plan.resources.filter((resource) => !APPLICABLE.has(resource.action));
   assert(
@@ -166,7 +188,7 @@ export function createSchedule(
     const { action } = resource;
     // `blocked` is empty, so every action that is not a reuse is a deploy or a call.
     if (action !== 'deploy' && action !== 'call') return [];
-    const { role, lane } = laneFor(resource, primary, ownerLane);
+    const { role, lane } = laneFor(resource, primary, ownerLane, named);
     const pooled = parallel && pool.length > 1 && poolable(resource);
     return [
       {

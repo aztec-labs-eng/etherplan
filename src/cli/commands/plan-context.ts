@@ -8,6 +8,7 @@ import type { StateFile } from '../../state/types.ts';
 import type { CreatePlanInput, Plan } from '../../planning/types.ts';
 import {
   addressesFromModule,
+  namedSigners,
   backendFromFile,
   planningJournal,
   signerFromModule,
@@ -54,10 +55,12 @@ export async function planFor(
         : null;
     const deployers = moduleAddresses?.deployers ?? options.deployers?.split(',');
     const owner = moduleAddresses?.owner ?? options.owner ?? null;
+    const named = moduleAddresses?.named ?? namedSigners(options['named-signers']);
     const pipeline = options.pipeline
       ? {
           deployers: deployers ?? [],
           owner,
+          named,
           parallel: options.parallel ?? false,
         }
       : null;
@@ -66,6 +69,7 @@ export async function planFor(
         ? {
             deployers,
             owner,
+            named,
             parallel: options.parallel ?? false,
           }
         : null;

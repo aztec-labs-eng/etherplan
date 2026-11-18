@@ -9,7 +9,7 @@ import {
 } from './transactions.ts';
 import { safeExternalError, safeRpcMessage } from './rpc-error.ts';
 import { ApplyError } from './errors.ts';
-import { transactionFor } from './shared.ts';
+import { signerFor, transactionFor } from './shared.ts';
 import { decide, checkExecutionDependencies, finish } from './outcome.ts';
 import { append, fail } from './report.ts';
 import { assertPinnedAbsent, pinnedIntentFields } from '../verification/pinned-runtime.ts';
@@ -40,7 +40,7 @@ export async function prepareBatch(
         actionId: entry.id,
       });
     if (await decide(ctx, item)) {
-      const signer = ctx.lanes.byAddress.get(entry.signer);
+      const signer = signerFor(ctx, entry);
       if (!signer)
         throw new ApplyError('signer', `Signer ${entry.signer} is unavailable.`, {
           actionId: entry.id,

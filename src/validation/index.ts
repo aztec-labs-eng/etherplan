@@ -178,7 +178,8 @@ export function validateResources(resources: PreparedResource[]): PreparedResour
       const abi = resource.abi ?? resource.targetArtifact?.abi;
       const name = resource.after.functionName;
       validateCheck(abi, resource.after, `${resource.id} check ${name} after`);
-      validateCheck(abi, resource.before, `${resource.id} check ${name} before`);
+      if (!resource.before.absent)
+        validateCheck(abi, resource.before, `${resource.id} check ${name} before`);
       encodeMethod(abi, resource.method, resource.args, resource.id);
     }
   }
