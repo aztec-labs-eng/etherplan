@@ -203,6 +203,11 @@ export async function assertSignerHistory(
           { actionId: signed.actionId, retryable: true },
         );
       }
+      const samePlan =
+        first.project === scope.project &&
+        first.environment === scope.environment &&
+        first.label === scope.label &&
+        first.planHash.toLowerCase() === ctx.plan.planHash.toLowerCase();
       await stableReceipt(
         ctx,
         mined.signed.transactionHash,
@@ -210,6 +215,7 @@ export async function assertSignerHistory(
         mined.signed.actionId,
         false,
         retry,
+        samePlan ? 1 : ctx.config.confirmations,
       );
     }
   }
@@ -297,7 +303,17 @@ async function assertLocalJournalSettled(
         `Local journal ${file} has unresolved transaction ${first.transactionHash} for signer ${address}. Resume that journal first.`,
         { actionId: first.actionId, retryable: true },
       );
-    await stableReceipt(ctx, mined.transactionHash, receipt, mined.actionId, false, retry);
+    await stableReceipt(
+      ctx,
+      mined.transactionHash,
+      receipt,
+      mined.actionId,
+      false,
+      retry,
+      currentRecords && first.planHash.toLowerCase() === ctx.plan.planHash.toLowerCase()
+        ? 1
+        : ctx.config.confirmations,
+    );
   }
 }
 

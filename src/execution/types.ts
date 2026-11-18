@@ -476,6 +476,8 @@ export type SignedFields = {
 
 export interface BroadcastAttemptFields {
   phase: 'broadcast-attempt';
+  /** A verified receipt was reorganized; recover these exact signed bytes before dependent reservations. */
+  reorgRecovery?: true;
   signer: Address;
   nonce: DecimalString;
   transactionHash: Hash;

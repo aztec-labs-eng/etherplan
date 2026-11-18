@@ -216,7 +216,11 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
   await recheckReused(ctx);
   // Preserve the dependency check for a later signed wave before revisiting
   // completed earlier waves. This also stops a resend if its prerequisite drifted.
-  if (ctx.pipeline) {
+  const recoveringReorg = [...ctx.prepared.keys()].some((id) => {
+    const latest = ctx.journal.forAction(ctx.plan.planHash, id).at(-1);
+    return latest?.phase === 'broadcast-attempt' && latest.reorgRecovery;
+  });
+  if (ctx.pipeline && !recoveringReorg) {
     for (const wave of ctx.schedule.waves) {
       if (!pipelineAttempt(ctx, wave)) continue;
       const work = wave.batches.flat().map((entry) => {
@@ -244,6 +248,7 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
   }
   // Later planned writes can invalidate an earlier getter, so record state only
   // after every action has settled and all desired conditions pass together.
+  await revalidateVerified(ctx, true, ctx.config.confirmations);
   ctx.state = await persist(ctx);
   return summary(ctx, 'applied');
 }

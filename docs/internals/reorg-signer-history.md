@@ -2,7 +2,7 @@
 
 Part of [Working on Etherplan](index.md).
 
-Status: fixed for `0.0.3-beta`. The local file backend retains signer journal history across completed applies, and the shared backend checks the current plan's signer index as well as older plans. Both stop a new signature when an earlier one lacks a canonical receipt at the configured confirmation depth.
+Status: fixed for `0.0.3-beta`. The local file backend retains signer journal history across completed applies, and the shared backend checks the current plan's signer index as well as older plans. Within one active plan, each wave can follow one canonical receipt. Other plans require the configured confirmation depth before they can use the signer. Apply checks that depth for all completed transactions before it writes state or reports success.
 
 ## Failure
 
@@ -18,7 +18,7 @@ This requires a reorg that removes the first transaction and another apply durin
 
 ## Required behavior
 
-Before a local signer signs a new transaction, every older signed transaction for that signer and chain must have a canonical receipt at the configured confirmation depth. An unresolved or orphaned signature stops the new signing attempt and identifies the journal and transaction to reconcile. A retry of an active plan may continue only through its existing validated recovery path, using its saved signature or an explicitly reviewed same-nonce replacement.
+Before a local signer signs a new transaction, each signed transaction from another plan for that signer and chain must have a canonical receipt at the configured confirmation depth. Completed transactions in the same active plan need one canonical receipt. An unresolved or orphaned signature stops the new signing attempt and identifies the journal and transaction to reconcile. A retry of an active plan uses its validated recovery path, with its saved signature or an explicitly reviewed same-nonce replacement. When a verified receipt is removed by a reorg, the journal reopens that action for recovery and the apply stops. A retry restores prerequisites before it broadcasts dependent reservations. If a dependent deployment reverts on the replacement chain, a new plan must deploy it again. Cached creation proofs from an orphaned block cannot prove the replacement receipt.
 
 The check should include:
 
