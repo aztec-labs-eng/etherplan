@@ -122,6 +122,7 @@ export function checkReferences(
   scope: NameScope,
   use: (root: 'var' | 'local', name: string) => void,
   salt?: (node: Located) => void,
+  createdTarget = false,
 ): void {
   switch (node.kind) {
     case 'literal':
@@ -134,8 +135,8 @@ export function checkReferences(
       return;
     case 'conditional':
       checkReferences(node.condition, what, scope, use);
-      checkReferences(node.then, what, scope, use, salt);
-      checkReferences(node.otherwise, what, scope, use, salt);
+      checkReferences(node.then, what, scope, use, salt, createdTarget);
+      checkReferences(node.otherwise, what, scope, use, salt, createdTarget);
       return;
     case 'binary':
       checkReferences(node.left, what, scope, use);
@@ -176,7 +177,13 @@ export function checkReferences(
   }
   if (!RESOURCE_ROOTS.has(root!)) unsupported();
   const addressable = root !== 'calls' && node.parts.length === 3 && field === 'address';
-  if (node.parts.length !== 2 && !addressable) unsupported();
+  const created =
+    createdTarget &&
+    root === 'contracts' &&
+    node.parts.length === 4 &&
+    field === 'created' &&
+    /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(node.parts[3]!);
+  if (node.parts.length !== 2 && !addressable && !created) unsupported();
   if (!scope.declared(root as Root, name))
     fail(node, `${what} references unknown ${root}.${name}.`);
 }
@@ -243,6 +250,27 @@ export class Evaluator {
     const [root, name] = node.parts as [Root, string];
     if (live) this.scope.live(root, name, node, what);
     return { root, name, id: `${KINDS[root]}:${name}` };
+  }
+
+  callTarget(node: HclExpression, what: string): string {
+    if (node.kind === 'conditional')
+      return this.callTarget(
+        this.condition(node.condition, what) ? node.then : node.otherwise,
+        what,
+      );
+    const local = this.local(node);
+    if (local) return this.callTarget(local.value, `${what} through local.${local.name}`);
+    if (
+      node.kind === 'reference' &&
+      node.parts.length === 4 &&
+      node.parts[0] === 'contracts' &&
+      node.parts[2] === 'created'
+    ) {
+      const parent = this.resource({ ...node, parts: node.parts.slice(0, 2) }, what, ['contracts']);
+      return `${parent.name}.created.${node.parts[3]!}`;
+    }
+    const target = this.resource(node, what, ['contracts', 'externals']);
+    return target.root === 'externals' ? target.id : target.name;
   }
 
   /** A list of live resources, such as after. */

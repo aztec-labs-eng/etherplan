@@ -755,11 +755,9 @@ async function verifyCall(
     after.expected,
     `${resource.id} after.expected`,
   );
-  const expectedBefore = normalizeOutputs(
-    fn.outputs ?? [],
-    before.expected,
-    `${resource.id} before.expected`,
-  );
+  const expectedBefore = before.absent
+    ? null
+    : normalizeOutputs(fn.outputs ?? [], before.expected, `${resource.id} before.expected`);
   const binding: BindingCheck = {
     name: resource.id,
     functionName: after.functionName,
@@ -771,9 +769,15 @@ async function verifyCall(
   if (args.length > 0) binding.args = args;
   result.bindingChecks.push(binding);
 
-  const code = await client.getCode({ address: resource.address, ...at(blockNumber) });
+  const checkAddress = after.address ?? resource.address;
+  const code = await client.getCode({ address: checkAddress, ...at(blockNumber) });
   if (!hasCode(code)) {
     binding.targetAbsent = true;
+    if (before.absent) {
+      binding.observed = 'before';
+      result.missingProofs.push('The checked address has no code; its creation call is pending.');
+      return finish(result);
+    }
     binding.error = 'Target contract has no code.';
     result.missingProofs.push('Target contract has no code yet, so the binding cannot be read.');
     return finish(result);
@@ -783,7 +787,7 @@ async function verifyCall(
   try {
     binding.actual = normalizeOutputs(
       fn.outputs ?? [],
-      await readFunction(client, { address: resource.address, fn, args, blockNumber }),
+      await readFunction(client, { address: checkAddress, fn, args, blockNumber }),
       `${resource.id} ${after.functionName}`,
     );
   } catch (error) {

@@ -12,7 +12,7 @@ import {
 } from '../spec/index.ts';
 import { executionWaves } from '../scheduling/index.ts';
 import { prepareResources, transactionFor } from './resources.ts';
-import { createSchedule } from '../scheduling/index.ts';
+import { createSchedule, normalizeNamedSigners } from '../scheduling/index.ts';
 import {
   verificationInconclusive,
   verifyResource,
@@ -557,7 +557,21 @@ export async function createPlan({
       (resource) => ['deploy', 'call'].includes(resource.action) && resource.signerRole === 'owner',
     );
     assert(!needsOwner || signers.owner, 'Plan with owner actions needs --owner <address>.');
+    const named = normalizeNamedSigners(signers.named);
+    for (const resource of planned) {
+      if (
+        ['deploy', 'call'].includes(resource.action) &&
+        'signerRole' in resource &&
+        resource.signerRole &&
+        !['deployer', 'owner'].includes(resource.signerRole)
+      )
+        assert(
+          Object.hasOwn(named, resource.signerRole),
+          `No named signer for ${resource.signerRole}.`,
+        );
+    }
     fields.signers = {
+      ...(Object.keys(named).length ? { named } : {}),
       deployers,
       owner: needsOwner && signers.owner ? (signers.owner.toLowerCase() as Address) : null,
       parallel: signers.parallel ?? false,
@@ -569,6 +583,7 @@ export async function createPlan({
     );
     const schedule = createSchedule(fields, deployers, {
       owner: pipeline.owner ?? null,
+      named: pipeline.named ?? {},
       parallel: pipeline.parallel ?? false,
       pipeline: true,
     });
@@ -578,7 +593,9 @@ export async function createPlan({
       throw new Error(
         `Cannot pipeline unschedulable actions: ${schedule.deferred.map((entry) => entry.id).join(', ')}.`,
       );
+    const named = normalizeNamedSigners(pipeline.named);
     fields.pipeline = {
+      ...(Object.keys(named).length ? { named } : {}),
       deployers,
       owner: pipeline.owner ? (pipeline.owner.toLowerCase() as Address) : null,
       parallel: pipeline.parallel ?? false,

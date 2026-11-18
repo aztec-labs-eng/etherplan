@@ -41,12 +41,15 @@ export interface PreparedCreatedCode {
 }
 
 export type PreparedCallCheck = {
+  address?: Address;
   functionName: string;
   args: JsonValue[];
 };
 
 /** The binding getter with the value it must hold before (`before`) or after (`after`) the call. */
 export type PreparedBinding = {
+  address?: Address;
+  absent?: true;
   functionName: string;
   args: JsonValue[];
   expected: JsonValue;
@@ -101,8 +104,8 @@ export interface PreparedContract extends PreparedBase {
 export interface PreparedCall extends PreparedBase {
   kind: 'call';
   id: CallId;
-  targetId: ContractId;
-  targetArtifact: NormalizedArtifact;
+  targetId: ContractId | ExternalId;
+  targetArtifact?: NormalizedArtifact;
   abi: NormalizedArtifact['abi'];
   method: string;
   args: JsonValue[];
@@ -231,7 +234,7 @@ export interface PlannedExternal extends PlannedBase {
 
 export interface PlannedCall extends PlannedBase {
   kind: 'call';
-  targetId: `contract:${string}`;
+  targetId: ContractId | ExternalId;
   method: string;
   args: JsonValue[];
   check: PreparedCallCheck;
@@ -247,6 +250,7 @@ export type PlannedResource = PlannedContract | PlannedExternal | PlannedCall;
 
 /** Lowercase addresses pinned at plan time; apply refuses different signers. */
 export interface PlanSigners {
+  named?: Record<string, Address>;
   deployers: Address[];
   owner: Address | null;
   parallel: boolean;
@@ -295,6 +299,7 @@ export type Plan = PlanV1 | PlanV2;
 
 /** Signer addresses for a plan; `deployers[0]` alone is used unless `parallel`. */
 export interface PlanSignerInput {
+  named?: Record<string, string>;
   deployers: string[];
   owner?: string | null;
   parallel?: boolean;
