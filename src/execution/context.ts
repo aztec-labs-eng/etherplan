@@ -66,10 +66,12 @@ export interface ApplyContext {
   schedule: Schedule | null;
 }
 
+export const DEFAULT_VERIFICATION_TIMEOUT_MS = 300_000;
+
 const DEFAULTS = {
   pollIntervalMs: 250,
   receiptTimeoutMs: 120_000,
-  verificationTimeoutMs: 300_000,
+  verificationTimeoutMs: DEFAULT_VERIFICATION_TIMEOUT_MS,
   gasMultiplier: 1.2,
   baseFeeMultiplier: DEFAULT_BASE_FEE_MULTIPLIER,
   fees: null,

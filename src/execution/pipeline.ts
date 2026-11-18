@@ -5,6 +5,8 @@ import {
   nonceConsumed,
   receiptAfterNonceUse,
   receiptRetryOptions,
+  retryRead,
+  signerNonces,
   broadcast,
   validateSignedTransaction,
   waitForReceipt,
@@ -346,6 +348,8 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
         receipt.transactionHash,
         receipt.receipt,
         job.item.planned.id,
+        false,
+        retry,
       );
   }
   for (const job of jobs.filter((entry) => entry.records.at(-1)?.phase === 'verified'))
@@ -373,10 +377,7 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
       );
   }
   for (const [address, group] of groups) {
-    const [latest, pending] = await Promise.all([
-      ctx.client.getTransactionCount({ address: address as Address, blockTag: 'latest' }),
-      ctx.client.getTransactionCount({ address: address as Address, blockTag: 'pending' }),
-    ]);
+    const [latest, pending] = await signerNonces(ctx.client, address as Address, retry);
     const first = group[0]!;
     const base = BigInt(first.intent.nonce);
     if (BigInt(latest) < base || BigInt(pending) < BigInt(latest))
@@ -611,11 +612,9 @@ export async function signPipelineBatch(
     group.push(job);
     groups.set(signer, group);
   }
+  const retry = receiptRetryOptions(ctx.config);
   for (const [signer, jobs] of groups) {
-    const [latest, pending] = await Promise.all([
-      ctx.client.getTransactionCount({ address: signer as Address, blockTag: 'latest' }),
-      ctx.client.getTransactionCount({ address: signer as Address, blockTag: 'pending' }),
-    ]);
+    const [latest, pending] = await signerNonces(ctx.client, signer as Address, retry);
     if (pending !== latest)
       return fail(
         ctx,
@@ -717,21 +716,18 @@ async function preparePipelineBroadcast(
   deadline?: number,
 ): Promise<PipelineAttempt> {
   const { signed } = job;
-  let receipt = await findKnownReceipt(
-    ctx.client,
-    job.variants,
-    receiptRetryOptions(ctx.config, deadline),
-  );
+  const retry = receiptRetryOptions(ctx.config, deadline);
+  let receipt = await findKnownReceipt(ctx.client, job.variants, retry);
   if (receipt) return { receipt };
-  if (await nonceConsumed(ctx.client, signed.signer, signed.nonce)) {
+  if (await nonceConsumed(ctx.client, signed.signer, signed.nonce, retry)) {
     receipt = await receiptAfterNonceUse(ctx.client, job.variants, ctx.config);
     if (receipt) return { receipt };
     await pipelineConflict(ctx, job);
   }
-  const pending = await ctx.client.getTransactionCount({
-    address: signed.signer,
-    blockTag: 'pending',
-  });
+  const pending = await retryRead(
+    () => ctx.client.getTransactionCount({ address: signed.signer, blockTag: 'pending' }),
+    retry,
+  );
   if (BigInt(pending) > BigInt(signed.nonce)) {
     const knownBroadcast = ctx.journal
       .forAction(ctx.plan.planHash, job.item.planned.id)

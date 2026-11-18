@@ -64,6 +64,9 @@ export { PROBE_ADDRESS, PROBE_CODE, simulateCreate, simulateCreate2 } from './si
 export { abiArguments, normalizeAbiValue, normalizeOutputs, safeError } from './values.ts';
 
 const PINNED_MINT = Symbol('pinned-runtime apply mint');
+const READ_FAILURES = Symbol('apply read failures');
+const NOT_FOUND = /^(?:Transaction|TransactionReceipt|Block)NotFoundError$/;
+const inconclusive = new WeakSet<VerificationResult>();
 
 /** Internal apply entry point. A public verification call can revalidate a saved pin but cannot mint one. */
 export async function verifyResourceForApply(
@@ -71,7 +74,45 @@ export async function verifyResourceForApply(
   client: Client,
   options: VerifyOptions = {},
 ): Promise<VerificationResult> {
-  return verifyResource(resource, client, { ...options, [PINNED_MINT]: true } as VerifyOptions);
+  return verifyResourceTracked(resource, client, {
+    ...options,
+    [PINNED_MINT]: true,
+  } as VerifyOptions);
+}
+
+/**
+ * Internal: public verification that also records whether a failed result rests on reads that a
+ * retry or another RPC could complete. The result itself is unchanged.
+ */
+export async function verifyResourceTracked(
+  resource: PreparedResource,
+  client: Client,
+  options: VerifyOptions = {},
+): Promise<VerificationResult> {
+  const reads = { failed: false };
+  const result = await verifyResource(resource, client, {
+    ...options,
+    [READ_FAILURES]: reads,
+  } as VerifyOptions);
+  if (reads.failed && result.status !== 'verified') inconclusive.add(result);
+  return result;
+}
+
+/** True for a tracked result whose provider failed, or briefly lacked a transaction, receipt or block. */
+export function verificationInconclusive(result: VerificationResult): boolean {
+  return inconclusive.has(result);
+}
+
+/**
+ * Notes a read that left evidence incomplete, for apply only; public results stay unchanged.
+ * Without an error, the provider answered with nothing. Returns whether the provider failed.
+ */
+function readFailed(options: object, error?: unknown): boolean {
+  const provider = error !== undefined && replayProviderFailure(error);
+  const reads = (options as { [READ_FAILURES]?: { failed: boolean } })[READ_FAILURES];
+  if (reads && (provider || error === undefined || NOT_FOUND.test(String((error as Error)?.name))))
+    reads.failed = true;
+  return provider;
 }
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -151,6 +192,7 @@ async function getterProof(
   check: PreparedCheck & { args?: JsonValue[] },
   abi: NormalizedArtifact['abi'] | undefined,
   blockNumber: bigint | undefined,
+  options: object,
 ): Promise<{ proof: Proof; fn: AbiFunction }> {
   const args = check.args ?? [];
   const fn = abiFunction(abi, check.functionName, args.length, resource.id);
@@ -175,6 +217,7 @@ async function getterProof(
     );
     proof.matched = sameJson(expected, proof.actual);
   } catch (error) {
+    readFailed(options, error);
     proof.error = safeError(error);
   }
   return { proof, fn };
@@ -579,7 +622,14 @@ async function verifyContract(
     (artifact.immutables ?? []).filter((item) => item.getter).map((item) => [item.getter, item]),
   );
   for (const check of resource.checks ?? []) {
-    const { proof, fn } = await getterProof(client, resource, check, artifact.abi, blockNumber);
+    const { proof, fn } = await getterProof(
+      client,
+      resource,
+      check,
+      artifact.abi,
+      blockNumber,
+      options,
+    );
     recordGetter(result, proof);
     const immutable = byGetter.get(check.functionName);
     if (!immutable || (fn.inputs ?? []).length !== 0 || (fn.outputs ?? []).length !== 1) continue;
@@ -669,7 +719,10 @@ async function verifyExternal(
     resource.abi ??
     (resource as PreparedExternal & { artifact?: NormalizedArtifact }).artifact?.abi;
   for (const check of checks)
-    recordGetter(result, (await getterProof(client, resource, check, abi, blockNumber)).proof);
+    recordGetter(
+      result,
+      (await getterProof(client, resource, check, abi, blockNumber, options)).proof,
+    );
   return finish(result);
 }
 
@@ -734,6 +787,7 @@ async function verifyCall(
       `${resource.id} ${after.functionName}`,
     );
   } catch (error) {
+    readFailed(options, error);
     binding.error = safeError(error);
     result.reasons.push(`Binding read ${after.functionName} failed: ${binding.error}`);
     return finish(result);
@@ -804,11 +858,12 @@ export async function verifyCreation(
     transaction = await client.getTransaction({ hash: transactionHash });
     receipt = await client.getTransactionReceipt({ hash: transactionHash });
   } catch (error) {
-    if (replayProviderFailure(error)) result.replayFailure = 'provider';
+    if (readFailed(options, error)) result.replayFailure = 'provider';
     result.reasons.push(`Creation transaction is not available: ${safeError(error)}`);
     return result;
   }
   if (!transaction || !receipt) {
+    readFailed(options);
     result.reasons.push('Creation transaction or receipt is not available.');
     return result;
   }
@@ -845,7 +900,7 @@ export async function verifyCreation(
     };
     block = await client.getBlock({ blockNumber: receipt.blockNumber });
   } catch (error) {
-    if (replayProviderFailure(error)) result.replayFailure = 'provider';
+    if (readFailed(options, error)) result.replayFailure = 'provider';
     result.reasons.push(`Creation block is not available: ${safeError(error)}`);
     return result;
   }
@@ -884,7 +939,7 @@ export async function verifyCreation(
       options.liveCode ??
       (await client.getCode({ address: resource.address, ...at(blockOf(options.blockNumber)) }));
   } catch (error) {
-    if (replayProviderFailure(error)) result.replayFailure = 'provider';
+    if (readFailed(options, error)) result.replayFailure = 'provider';
     result.reasons.push(`Current runtime is not available: ${safeError(error)}`);
     return result;
   }
@@ -999,7 +1054,7 @@ export async function verifyCreation(
           blockNumber: receipt.blockNumber,
         });
     } catch (error) {
-      if (replayProviderFailure(error)) result.replayFailure = 'provider';
+      if (readFailed(options, error)) result.replayFailure = 'provider';
       result.reasons.push(`CREATE2 factory code is not available: ${safeError(error)}`);
       return result;
     }
@@ -1055,7 +1110,7 @@ export async function verifyCreation(
       blockNumber: receipt.blockNumber,
     });
   } catch (error) {
-    if (replayProviderFailure(error)) result.replayFailure = 'provider';
+    if (readFailed(options, error)) result.replayFailure = 'provider';
     result.reasons.push(`Runtime at the creation block is not available: ${safeError(error)}`);
     return result;
   }
@@ -1106,6 +1161,7 @@ export async function verifyCreation(
           check,
           resource.artifact.abi,
           checkBlock,
+          options,
         );
         if (!getter.matched) {
           result.reasons.push(
@@ -1198,6 +1254,7 @@ export async function verifyCreation(
           lower(evidence.receiptCodeHash) === lower(child.codeHash) &&
           lower(evidence.currentCodeHash) === lower(child.codeHash);
       } catch (error) {
+        readFailed(options, error);
         result.reasons.push(
           `Created child ${child.getter} cannot be checked at receipt and current blocks: ${safeError(error)}`,
         );
@@ -1235,7 +1292,7 @@ export async function verifyCreation(
     });
     result.exactRuntime = lower(runtime) === lower(receiptCode);
   } catch (error) {
-    if (replayProviderFailure(error)) {
+    if (readFailed(options, error)) {
       result.replayFailure = 'provider';
       result.reasons.push(
         'Creation simulation at the receipt block could not be completed by the RPC provider. Retry this saved plan with a compatible RPC endpoint.',

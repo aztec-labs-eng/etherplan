@@ -3,21 +3,29 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { InternalRpcError } from 'viem';
+import { InternalRpcError, TransactionReceiptNotFoundError } from 'viem';
 import { applyPlan } from '../src/execution/index.ts';
 import { readLocalJournal } from '../src/execution/journal.ts';
 import { createPlan } from '../src/planning/index.ts';
 import { deployerA, fixtureMany, startAnvil } from './execution/chain.ts';
 
-for (const [pipeline, phase] of [
+// Each row fails one read once. 'settling' and 'unindexed' fail it after the broadcast;
+// 'unindexed' also reports the receipt missing once, so settlement must read the nonce.
+for (const [pipeline, phase, read = 'getTransactionReceipt'] of [
   [true, 'fresh'],
   [false, 'signed'],
   [true, 'signed'],
   [false, 'verified'],
   [false, 'history'],
   [true, 'polling'],
+  [false, 'settling', 'getBlock'],
+  [true, 'settling', 'getBlock'],
+  [false, 'unindexed', 'getTransactionCount'],
+  [true, 'unindexed', 'getTransactionCount'],
+  [false, 'fresh', 'getTransactionCount'],
+  [true, 'fresh', 'getTransactionCount'],
 ]) {
-  test(`${pipeline ? 'pipeline' : 'serial'} ${phase} receipt outage recovers without duplicate transactions`, async (t) => {
+  test(`${pipeline ? 'pipeline' : 'serial'} ${phase} ${read} outage recovers without duplicate transactions`, async (t) => {
     const chain = await startAnvil();
     const dir = await mkdtemp(path.join(os.tmpdir(), 'etherplan-receipt-recovery-'));
     try {
@@ -70,23 +78,37 @@ for (const [pipeline, phase] of [
         );
       }
       let failed = false;
+      let withheld = false;
       let broadcasted = false;
       let offset = 0;
       const now = Date.now.bind(Date);
       if (phase === 'polling') t.mock.method(Date, 'now', () => now() + offset);
+      const outage = (method) => async (request) => {
+        if (
+          phase === 'unindexed' &&
+          method === 'getTransactionReceipt' &&
+          broadcasted &&
+          !withheld
+        ) {
+          withheld = true;
+          throw new TransactionReceiptNotFoundError({ hash: request.hash });
+        }
+        if (
+          method === read &&
+          !failed &&
+          (!historyHash || request.hash === historyHash) &&
+          (!['polling', 'settling', 'unindexed'].includes(phase) || broadcasted)
+        ) {
+          failed = true;
+          if (phase === 'polling') offset += 1_100;
+          throw new InternalRpcError(new Error('temporarily unavailable'));
+        }
+        return chain.client[method](request);
+      };
       const client = Object.assign(Object.create(chain.client), {
-        async getTransactionReceipt(request) {
-          if (
-            !failed &&
-            (!historyHash || request.hash === historyHash) &&
-            (phase !== 'polling' || broadcasted)
-          ) {
-            failed = true;
-            if (phase === 'polling') offset += 1_100;
-            throw new InternalRpcError(new Error('temporarily unavailable'));
-          }
-          return chain.client.getTransactionReceipt(request);
-        },
+        getTransactionReceipt: outage('getTransactionReceipt'),
+        getBlock: outage('getBlock'),
+        getTransactionCount: outage('getTransactionCount'),
       });
       const result = await applyPlan({
         ...input,

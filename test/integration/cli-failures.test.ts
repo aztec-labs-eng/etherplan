@@ -79,17 +79,13 @@ async function waitForSigned(file, child) {
   throw new Error('Apply did not write the signed record within 10 seconds.');
 }
 
-async function signedGate(target) {
-  const stalled = new Set();
+// Forwards JSON-RPC requests to target unless intercept answers or holds the response.
+async function rpcProxy(target, intercept) {
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const body = Buffer.concat(chunks).toString('utf8');
-    if (JSON.parse(body).method === 'eth_sendRawTransaction') {
-      stalled.add(response);
-      response.on('close', () => stalled.delete(response));
-      return;
-    }
+    if (intercept(JSON.parse(body), response)) return;
     const upstream = await fetch(target, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -105,12 +101,118 @@ async function signedGate(target) {
   const { port } = server.address();
   return {
     url: `http://127.0.0.1:${port}`,
+    close: () => new Promise((resolve) => server.close(resolve)),
+  };
+}
+
+async function signedGate(target) {
+  const stalled = new Set();
+  const proxy = await rpcProxy(target, (payload, response) => {
+    if (payload.method !== 'eth_sendRawTransaction') return false;
+    stalled.add(response);
+    response.on('close', () => stalled.delete(response));
+    return true;
+  });
+  return {
+    url: proxy.url,
     async close() {
       for (const response of stalled) response.destroy();
-      await new Promise((resolve) => server.close(resolve));
+      await proxy.close();
     },
   };
 }
+
+test('apply without a saved plan retries a transient receipt failure while planning', async () => {
+  const anvil = await startAnvil();
+  const ws = await workspace('etherplan-cli-autoplan-');
+  let proxy;
+  try {
+    const planned = runSync(
+      [
+        'plan',
+        '--fixture',
+        ws.specFile,
+        '--out',
+        ws.planFile,
+        '--state',
+        ws.stateFile,
+        ...planArgs,
+      ],
+      anvil.rpcUrl,
+    );
+    assert.equal(planned.status, 0, `${planned.stderr}\n${planned.stdout}`);
+    const deployed = runSync(
+      [
+        'apply',
+        '--fixture',
+        ws.specFile,
+        '--plan',
+        ws.planFile,
+        '--state',
+        ws.stateFile,
+        '--journal',
+        ws.journalFile,
+      ],
+      anvil.rpcUrl,
+      true,
+    );
+    assert.equal(deployed.status, 0, `${deployed.stderr}\n${deployed.stdout}`);
+
+    // The transport retries each read three times, so six failures outlast its first read.
+    let failures = 0;
+    proxy = await rpcProxy(anvil.rpcUrl, (payload, response) => {
+      if (payload.method !== 'eth_getTransactionReceipt' || failures >= 6) return false;
+      failures++;
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: payload.id,
+          error: { code: -32603, message: 'temporarily unavailable' },
+        }),
+      );
+      return true;
+    });
+    const child = spawn(
+      process.execPath,
+      [
+        'dist/cli.js',
+        'apply',
+        '--json',
+        '--fixture',
+        ws.specFile,
+        '--state',
+        ws.stateFile,
+        '--journal',
+        ws.journalFile,
+        '--max-spend-wei',
+        '100000000000000000000',
+      ],
+      {
+        cwd: projectDirectory,
+        env: {
+          ...process.env,
+          ETH_RPC_URL: proxy.url,
+          DEPLOYER_PRIVATE_KEYS: deployerKey,
+          OWNER_PRIVATE_KEY: ownerKey,
+        },
+      },
+    );
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => (stdout += chunk));
+    child.stderr.on('data', (chunk) => (stderr += chunk));
+    child.stdin.end('yes\n');
+    const status = await new Promise((resolve) => child.once('close', resolve));
+    assert.equal(status, 0, `${stderr}\n${stdout}`);
+    assert.equal(failures, 6);
+    assert.equal(JSON.parse(stdout).transactionsSigned, 0);
+  } finally {
+    await proxy?.close();
+    await rm(ws.directory, { recursive: true, force: true });
+    await stopAnvil(anvil);
+  }
+});
 
 test('apply rejects a spec changed after planning before any signature', async () => {
   const anvil = await startAnvil();

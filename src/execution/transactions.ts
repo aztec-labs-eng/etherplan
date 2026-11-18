@@ -235,7 +235,7 @@ export async function broadcast(client: Client, rawTransaction: Hex): Promise<Br
   }
 }
 
-interface ReceiptRetryOptions {
+export interface ReceiptRetryOptions {
   deadline: number;
   pollIntervalMs: number;
 }
@@ -247,21 +247,46 @@ export function receiptRetryOptions(
   return { deadline, pollIntervalMs: config.pollIntervalMs };
 }
 
-// The shared deadline bounds retries; the transport still controls each in-flight request's timeout.
+// Retries a read only. The shared deadline bounds retries; the transport still controls each
+// in-flight request's timeout. An exhausted read rethrows, so it never stands in for an answer.
+export async function retryRead<T>(
+  read: () => Promise<T>,
+  retry?: ReceiptRetryOptions,
+): Promise<T> {
+  for (;;) {
+    try {
+      return await read();
+    } catch (error) {
+      if (!retry || !isTransientRpcError(error) || Date.now() >= retry.deadline) throw error;
+      await sleep(Math.min(retry.pollIntervalMs, Math.max(0, retry.deadline - Date.now())));
+      if (Date.now() >= retry.deadline) throw error;
+    }
+  }
+}
+
 export async function findReceipt(
   client: Client,
   hash: Hash,
   retry?: ReceiptRetryOptions,
 ): Promise<Receipt | null> {
-  for (;;) {
-    try {
-      return await client.getTransactionReceipt({ hash });
-    } catch (error) {
-      if ((error as Error)?.name === 'TransactionReceiptNotFoundError') return null;
-      if (!retry || !isTransientRpcError(error) || Date.now() >= retry.deadline) throw error;
-      await sleep(Math.min(retry.pollIntervalMs, Math.max(0, retry.deadline - Date.now())));
-      if (Date.now() >= retry.deadline) throw error;
-    }
+  try {
+    return await retryRead(() => client.getTransactionReceipt({ hash }), retry);
+  } catch (error) {
+    if ((error as Error)?.name === 'TransactionReceiptNotFoundError') return null;
+    throw error;
+  }
+}
+
+export async function findBlock(
+  client: Client,
+  blockNumber: bigint,
+  retry?: ReceiptRetryOptions,
+): Promise<{ hash: Hash } | null> {
+  try {
+    return await retryRead(() => client.getBlock({ blockNumber }), retry);
+  } catch (error) {
+    if ((error as Error)?.name === 'BlockNotFoundError') return null;
+    throw error;
   }
 }
 
@@ -277,12 +302,32 @@ export async function findKnownReceipt(
   return null;
 }
 
+// Both counts come from one attempt, so a retry never pairs counts read at different times.
+export function signerNonces(
+  client: Client,
+  address: Address,
+  retry?: ReceiptRetryOptions,
+): Promise<[latest: number, pending: number]> {
+  return retryRead(
+    () =>
+      Promise.all([
+        client.getTransactionCount({ address, blockTag: 'latest' }),
+        client.getTransactionCount({ address, blockTag: 'pending' }),
+      ]),
+    retry,
+  );
+}
+
 export async function nonceConsumed(
   client: Client,
   signer: Address,
   nonce: DecimalString | number | bigint,
+  retry?: ReceiptRetryOptions,
 ): Promise<boolean> {
-  const latest = await client.getTransactionCount({ address: signer, blockTag: 'latest' });
+  const latest = await retryRead(
+    () => client.getTransactionCount({ address: signer, blockTag: 'latest' }),
+    retry,
+  );
   return BigInt(latest) > BigInt(nonce);
 }
 
@@ -320,13 +365,11 @@ export async function waitForReceipt(
 ): Promise<ReceiptWait> {
   const deadline = Date.now() + timeoutMs;
   const variants = signedVariants ?? (hash === undefined ? [] : [{ transactionHash: hash }]);
+  const retry = { deadline: retryDeadline ?? deadline, pollIntervalMs };
   for (;;) {
-    const receipt = await findKnownReceipt(client, variants, {
-      deadline: retryDeadline ?? deadline,
-      pollIntervalMs,
-    });
+    const receipt = await findKnownReceipt(client, variants, retry);
     if (receipt) return { receipt };
-    if (await nonceConsumed(client, signer, nonce)) {
+    if (await nonceConsumed(client, signer, nonce, retry)) {
       const late = await receiptAfterNonceUse(client, variants, {
         pollIntervalMs,
         receiptTimeoutMs,

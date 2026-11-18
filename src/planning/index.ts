@@ -13,7 +13,11 @@ import {
 import { executionWaves } from '../scheduling/index.ts';
 import { prepareResources, transactionFor } from './resources.ts';
 import { createSchedule } from '../scheduling/index.ts';
-import { verifyResource } from '../verification/index.ts';
+import {
+  verificationInconclusive,
+  verifyResource,
+  verifyResourceTracked,
+} from '../verification/index.ts';
 import { recoveryProof } from '../recovery.ts';
 import { assertPinnedAbsent } from '../verification/pinned-runtime.ts';
 import type { Block } from 'viem';
@@ -21,6 +25,7 @@ import type { ContractStateResource, StateFile } from '../state/types.ts';
 import type {
   Address,
   ChainIdentity,
+  Client,
   ContractId,
   DistributiveOmit,
   Hash,
@@ -314,6 +319,27 @@ function assertStateChain(state: StateFile | null, chain: ChainIdentity): void {
   );
 }
 
+/** Internal, not exported publicly: apply's automatic planning retries inconclusive reads. */
+export const RETRY_INCONCLUSIVE_READS = Symbol('retry inconclusive planning reads');
+
+// The plan still confirms its observed block at the end, so retries cannot hide a reorg.
+async function verifyRetrying(
+  resource: PreparedResource,
+  client: Client,
+  options: VerifyOptions,
+  deadline: number,
+): Promise<VerificationResult> {
+  let delay = 500;
+  for (;;) {
+    const result = await verifyResourceTracked(resource, client, options);
+    if (!verificationInconclusive(result) || Date.now() >= deadline) return result;
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(delay, Math.max(0, deadline - Date.now()))),
+    );
+    delay = Math.min(delay * 2, 10_000);
+  }
+}
+
 /**
  * Builds a plan from one observed chain block. Resolves values in resolution order,
  * evaluates unsafe dependents in execution order, and confirms the
@@ -329,7 +355,11 @@ export async function createPlan({
   pipeline = null,
   signers = null,
   maxSpendWei = null,
+  ...internal
 }: CreatePlanInput): Promise<Plan> {
+  const retry = (internal as { [RETRY_INCONCLUSIVE_READS]?: { timeoutMs: number } })[
+    RETRY_INCONCLUSIVE_READS
+  ];
   assert(
     client && typeof client.getChainId === 'function' && typeof client.getBlock === 'function',
     'Plan needs a read-only chain client.',
@@ -399,7 +429,9 @@ export async function createPlan({
     options.chain = chain;
     options.journalRecords = journalRecords;
     onResourceCheck?.(resource.id);
-    const verification = await verifyResource(resource, client, options);
+    const verification = retry
+      ? await verifyRetrying(resource, client, options, Date.now() + retry.timeoutMs)
+      : await verifyResource(resource, client, options);
     const stateComparison = compareState(resource, state, verification);
     const observation: PlanObservation = stateComparison
       ? { ...verification, stateComparison }

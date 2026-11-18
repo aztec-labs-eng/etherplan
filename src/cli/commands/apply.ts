@@ -2,7 +2,8 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createPublicClient, http } from 'viem';
 import { applyPlan } from '../../execution/index.ts';
-import { createPlan } from '../../planning/index.ts';
+import { DEFAULT_VERIFICATION_TIMEOUT_MS } from '../../execution/context.ts';
+import { RETRY_INCONCLUSIVE_READS, createPlan } from '../../planning/index.ts';
 import { readState, validateState } from '../../state/index.ts';
 import type { ReplacementFees } from '../../execution/types.ts';
 import type { StateFile } from '../../state/types.ts';
@@ -104,7 +105,10 @@ export async function apply(context: ChainCommandContext): Promise<void> {
       journalRecords,
       signers: { ...addresses, parallel: options.parallel ?? false },
       maxSpendWei: options['max-spend-wei'],
-    });
+      [RETRY_INCONCLUSIVE_READS]: {
+        timeoutMs: transactionOptions.verificationTimeoutMs ?? DEFAULT_VERIFICATION_TIMEOUT_MS,
+      },
+    } as Parameters<typeof createPlan>[0]);
     await approvePlan(plan);
     if (planningBackend?.planStore) {
       await planningBackend.planStore.put(planningBackend.scope, plan);

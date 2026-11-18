@@ -203,7 +203,14 @@ export async function assertSignerHistory(
           { actionId: signed.actionId, retryable: true },
         );
       }
-      await stableReceipt(ctx, mined.signed.transactionHash, mined.receipt, mined.signed.actionId);
+      await stableReceipt(
+        ctx,
+        mined.signed.transactionHash,
+        mined.receipt,
+        mined.signed.actionId,
+        false,
+        retry,
+      );
     }
   }
 }
@@ -290,7 +297,7 @@ async function assertLocalJournalSettled(
         `Local journal ${file} has unresolved transaction ${first.transactionHash} for signer ${address}. Resume that journal first.`,
         { actionId: first.actionId, retryable: true },
       );
-    await stableReceipt(ctx, mined.transactionHash, receipt, mined.actionId);
+    await stableReceipt(ctx, mined.transactionHash, receipt, mined.actionId, false, retry);
   }
 }
 
@@ -371,7 +378,7 @@ export async function send(
       const retry = receiptRetryOptions(ctx.config);
       const receipt = await findKnownReceipt(ctx.client, variants, retry);
       if (receipt) return receipt;
-      if (await nonceConsumed(ctx.client, signed.signer, signed.nonce)) {
+      if (await nonceConsumed(ctx.client, signed.signer, signed.nonce, retry)) {
         const late = await receiptAfterNonceUse(ctx.client, variants, ctx.config);
         if (late) return late;
         await fail(
@@ -596,7 +603,7 @@ async function settle(
   );
   const retry = receiptRetryOptions(ctx.config);
   let receipt = await findKnownReceipt(ctx.client, variants, retry);
-  if (!receipt && (await nonceConsumed(ctx.client, signed.signer, signed.nonce))) {
+  if (!receipt && (await nonceConsumed(ctx.client, signed.signer, signed.nonce, retry))) {
     receipt = await receiptAfterNonceUse(ctx.client, variants, ctx.config);
     if (!receipt) {
       await fail(
@@ -635,7 +642,7 @@ async function settleForeign(ctx: ApplyContext, signed: SignedRecord): Promise<J
   const retry = receiptRetryOptions(ctx.config);
   let receipt = await findKnownReceipt(ctx.client, variants, retry);
   if (!receipt) {
-    if (!(await nonceConsumed(ctx.client, signed.signer, signed.nonce))) {
+    if (!(await nonceConsumed(ctx.client, signed.signer, signed.nonce, retry))) {
       throw new ApplyError(
         'foreign-outstanding',
         `Plan ${signed.planHash} has signed transaction ${signed.transactionHash} (signer ${signed.signer}, nonce ${signed.nonce}) that is not on chain. Resume that plan, or wait until the nonce is used, before you apply another plan.`,
