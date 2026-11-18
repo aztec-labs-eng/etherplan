@@ -4,6 +4,7 @@ import {
   findKnownReceipt,
   nonceConsumed,
   receiptAfterNonceUse,
+  receiptRetryOptions,
   broadcast,
   validateSignedTransaction,
   waitForReceipt,
@@ -292,8 +293,9 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
   ) {
     throw new ApplyError('journal', `Wave ${wave.wave} shares a reservation across signer groups.`);
   }
+  const retry = receiptRetryOptions(ctx.config);
   for (const job of jobs)
-    job.receipt = job.signed ? await findKnownReceipt(ctx.client, job.variants) : null;
+    job.receipt = job.signed ? await findKnownReceipt(ctx.client, job.variants, retry) : null;
   const conflict = jobs.find((job) => {
     const last = job.records.at(-1);
     return (
@@ -712,9 +714,14 @@ async function pipelineConflict(
 async function preparePipelineBroadcast(
   ctx: ApplyContext,
   job: ActivePipelineJob,
+  deadline?: number,
 ): Promise<PipelineAttempt> {
   const { signed } = job;
-  let receipt = await findKnownReceipt(ctx.client, job.variants);
+  let receipt = await findKnownReceipt(
+    ctx.client,
+    job.variants,
+    receiptRetryOptions(ctx.config, deadline),
+  );
   if (receipt) return { receipt };
   if (await nonceConsumed(ctx.client, signed.signer, signed.nonce)) {
     receipt = await receiptAfterNonceUse(ctx.client, job.variants, ctx.config);
@@ -822,8 +829,9 @@ async function attemptPipelineBroadcast(
   ctx: ApplyContext,
   job: ActivePipelineJob,
   rebroadcast: boolean,
+  deadline: number,
 ): Promise<PipelineAttempt> {
-  const prepared = await preparePipelineBroadcast(ctx, job);
+  const prepared = await preparePipelineBroadcast(ctx, job, deadline);
   if (prepared.receipt) return prepared;
   await ctx.lock.assertHeld?.();
   return sendPipelineTransaction(ctx, job, rebroadcast);
@@ -854,7 +862,10 @@ export async function settlePipelineBatch(
   const submitStart = Date.now();
   // Reconcile the complete group first. Then initiate all raw requests in plan
   // order without waiting for a lower nonce's RPC response.
-  const prepared = await Promise.all(work.map((job) => preparePipelineBroadcast(ctx, job)));
+  const preparationDeadline = Date.now() + ctx.config.receiptTimeoutMs;
+  const prepared = await Promise.all(
+    work.map((job) => preparePipelineBroadcast(ctx, job, preparationDeadline)),
+  );
   // One lease check covers the group, so no await separates its first requests.
   await ctx.lock.assertHeld?.();
   const firstAttempts = await Promise.all(
@@ -888,7 +899,7 @@ export async function settlePipelineBatch(
                   { actionId: job.item.planned.id, retryable: true },
                 );
               await pause(ctx.config.pollIntervalMs);
-              attempt = await attemptPipelineBroadcast(ctx, job, true);
+              attempt = await attemptPipelineBroadcast(ctx, job, true, deadline);
             }
           } finally {
             ctx.timings.submitMs += Date.now() - retryStart;
@@ -905,6 +916,7 @@ export async function settlePipelineBatch(
           pollIntervalMs: ctx.config.pollIntervalMs,
           timeoutMs: Math.min(1_000, Math.max(0, deadline - Date.now())),
           receiptTimeoutMs: ctx.config.receiptTimeoutMs,
+          retryDeadline: deadline,
         });
         if ('dead' in waited) await pipelineConflict(ctx, job);
         if ('receipt' in waited) {
@@ -923,7 +935,7 @@ export async function settlePipelineBatch(
         if (!known || Date.now() >= knownRetryAt) {
           const retryStart = Date.now();
           try {
-            attempt = await attemptPipelineBroadcast(ctx, job, true);
+            attempt = await attemptPipelineBroadcast(ctx, job, true, deadline);
           } finally {
             ctx.timings.submitMs += Date.now() - retryStart;
           }

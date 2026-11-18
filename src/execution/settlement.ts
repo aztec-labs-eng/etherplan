@@ -14,6 +14,7 @@ import {
   nonceConsumed,
   receiptAfterNonceUse,
   receiptJson,
+  receiptRetryOptions,
   signEnvelope,
   validateSignedTransaction,
   waitForReceipt,
@@ -185,9 +186,10 @@ export async function assertSignerHistory(
         first.planHash.toLowerCase() === ctx.plan.planHash.toLowerCase() &&
         signed.every((record) => activeSignatures.has(record.transactionHash.toLowerCase()));
       if (activeCurrent) continue;
+      const retry = receiptRetryOptions(ctx.config);
       let mined: { signed: SignedIndexEntry; receipt: Receipt } | null = null;
       for (const signed of variants) {
-        const receipt = await findReceipt(ctx.client, signed.transactionHash);
+        const receipt = await findReceipt(ctx.client, signed.transactionHash, retry);
         if (receipt) {
           mined = { signed, receipt };
           break;
@@ -272,10 +274,11 @@ async function assertLocalJournalSettled(
       variants.every((record) => activeSignatures.has(record.transactionHash.toLowerCase()))
     )
       continue;
+    const retry = receiptRetryOptions(ctx.config);
     let receipt: Receipt | null = null;
     let mined: SignedRecord | null = null;
     for (const signed of variants) {
-      receipt = await findReceipt(ctx.client, signed.transactionHash);
+      receipt = await findReceipt(ctx.client, signed.transactionHash, retry);
       if (receipt) {
         mined = signed;
         break;
@@ -365,7 +368,8 @@ export async function send(
   });
   if (!sent.accepted) {
     if (sent.nonceTooLow) {
-      const receipt = await findKnownReceipt(ctx.client, variants);
+      const retry = receiptRetryOptions(ctx.config);
+      const receipt = await findKnownReceipt(ctx.client, variants, retry);
       if (receipt) return receipt;
       if (await nonceConsumed(ctx.client, signed.signer, signed.nonce)) {
         const late = await receiptAfterNonceUse(ctx.client, variants, ctx.config);
@@ -590,7 +594,8 @@ async function settle(
     ctx.journal.forAction(ctx.plan.planHash, item.planned.id),
     signed,
   );
-  let receipt = await findKnownReceipt(ctx.client, variants);
+  const retry = receiptRetryOptions(ctx.config);
+  let receipt = await findKnownReceipt(ctx.client, variants, retry);
   if (!receipt && (await nonceConsumed(ctx.client, signed.signer, signed.nonce))) {
     receipt = await receiptAfterNonceUse(ctx.client, variants, ctx.config);
     if (!receipt) {
@@ -614,7 +619,7 @@ async function settle(
     // journaled variant has a receipt or an unknown transaction consumes it.
     await checkExecutionDependencies(ctx, [{ item }], false);
     signed = await replaceSigned(ctx, item, signed, variants);
-    receipt = await findKnownReceipt(ctx.client, variants);
+    receipt = await findKnownReceipt(ctx.client, variants, retry);
     if (!receipt) receipt = await send(ctx, item, signed, { rebroadcast: true, variants });
   }
   const mined = matchingVariant(variants, receipt);
@@ -627,7 +632,8 @@ async function settle(
 async function settleForeign(ctx: ApplyContext, signed: SignedRecord): Promise<JournalRecord> {
   const identity = { planHash: signed.planHash, chain: signed.chain };
   const variants = signedVariants(ctx.journal.forAction(signed.planHash, signed.actionId), signed);
-  let receipt = await findKnownReceipt(ctx.client, variants);
+  const retry = receiptRetryOptions(ctx.config);
+  let receipt = await findKnownReceipt(ctx.client, variants, retry);
   if (!receipt) {
     if (!(await nonceConsumed(ctx.client, signed.signer, signed.nonce))) {
       throw new ApplyError(

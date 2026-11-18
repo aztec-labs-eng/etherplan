@@ -1,7 +1,7 @@
 import { hashJson } from '../identity.ts';
 import { checkFactory, checkVerificationChain, jsonSafe } from './preflight.ts';
 import { LIVE_PHASES, intentForSigned, latestRecord } from './journal.ts';
-import { findReceipt, validateSignedTransaction } from './transactions.ts';
+import { findReceipt, receiptRetryOptions, validateSignedTransaction } from './transactions.ts';
 import { ApplyError } from './errors.ts';
 import { isRpcError } from './rpc-error.ts';
 import { pause } from './shared.ts';
@@ -201,9 +201,10 @@ export async function stableReceipt(
   actionId: ResourceId,
   wait = false,
 ): Promise<Receipt> {
-  const deadline = Date.now() + ctx.config.receiptTimeoutMs;
+  const retry = receiptRetryOptions(ctx.config);
+  const deadline = retry.deadline;
   for (;;) {
-    const current = await findReceipt(ctx.client, transactionHash);
+    const current = await findReceipt(ctx.client, transactionHash, retry);
     const block =
       current && (await ctx.client.getBlock({ blockNumber: BigInt(receipt.blockNumber) }));
     if (

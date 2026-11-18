@@ -9,6 +9,7 @@ import type { TransactionSerialized } from 'viem';
 import type { PlannedResource } from '../planning/types.ts';
 import type { Address, Client, DecimalString, Hash, Hex } from '../types.ts';
 import type {
+  ApplyConfig,
   BroadcastOutcome,
   EstimateGasInput,
   FeeOverride,
@@ -23,7 +24,7 @@ import type {
   TransactionEnvelope,
   WaitForReceiptInput,
 } from './types.ts';
-import { classifyRpcFailure, safeRpcMessage } from './rpc-error.ts';
+import { classifyRpcFailure, isTransientRpcError, safeRpcMessage } from './rpc-error.ts';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -234,21 +235,43 @@ export async function broadcast(client: Client, rawTransaction: Hex): Promise<Br
   }
 }
 
-export async function findReceipt(client: Client, hash: Hash): Promise<Receipt | null> {
-  try {
-    return await client.getTransactionReceipt({ hash });
-  } catch (error) {
-    if ((error as Error).name === 'TransactionReceiptNotFoundError') return null;
-    throw error;
+interface ReceiptRetryOptions {
+  deadline: number;
+  pollIntervalMs: number;
+}
+
+export function receiptRetryOptions(
+  config: Pick<ApplyConfig, 'receiptTimeoutMs' | 'pollIntervalMs'>,
+  deadline = Date.now() + config.receiptTimeoutMs,
+): ReceiptRetryOptions {
+  return { deadline, pollIntervalMs: config.pollIntervalMs };
+}
+
+// The shared deadline bounds retries; the transport still controls each in-flight request's timeout.
+export async function findReceipt(
+  client: Client,
+  hash: Hash,
+  retry?: ReceiptRetryOptions,
+): Promise<Receipt | null> {
+  for (;;) {
+    try {
+      return await client.getTransactionReceipt({ hash });
+    } catch (error) {
+      if ((error as Error)?.name === 'TransactionReceiptNotFoundError') return null;
+      if (!retry || !isTransientRpcError(error) || Date.now() >= retry.deadline) throw error;
+      await sleep(Math.min(retry.pollIntervalMs, Math.max(0, retry.deadline - Date.now())));
+      if (Date.now() >= retry.deadline) throw error;
+    }
   }
 }
 
 export async function findKnownReceipt(
   client: Client,
   signedVariants: { transactionHash: Hash }[],
+  retry?: ReceiptRetryOptions,
 ): Promise<Receipt | null> {
   for (const signed of signedVariants) {
-    const receipt = await findReceipt(client, signed.transactionHash);
+    const receipt = await findReceipt(client, signed.transactionHash, retry);
     if (receipt) return receipt;
   }
   return null;
@@ -275,7 +298,7 @@ export async function receiptAfterNonceUse(
 ): Promise<Receipt | null> {
   const deadline = Date.now() + Math.min(receiptTimeoutMs, MAX_NONCE_GRACE_MS);
   for (;;) {
-    const receipt = await findKnownReceipt(client, signedVariants);
+    const receipt = await findKnownReceipt(client, signedVariants, { deadline, pollIntervalMs });
     if (receipt || Date.now() >= deadline) return receipt;
     await sleep(pollIntervalMs);
   }
@@ -292,12 +315,16 @@ export async function waitForReceipt(
     pollIntervalMs,
     timeoutMs,
     receiptTimeoutMs,
+    retryDeadline,
   }: WaitForReceiptInput,
 ): Promise<ReceiptWait> {
   const deadline = Date.now() + timeoutMs;
   const variants = signedVariants ?? (hash === undefined ? [] : [{ transactionHash: hash }]);
   for (;;) {
-    const receipt = await findKnownReceipt(client, variants);
+    const receipt = await findKnownReceipt(client, variants, {
+      deadline: retryDeadline ?? deadline,
+      pollIntervalMs,
+    });
     if (receipt) return { receipt };
     if (await nonceConsumed(client, signer, nonce)) {
       const late = await receiptAfterNonceUse(client, variants, {

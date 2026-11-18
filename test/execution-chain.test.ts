@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, afterEach, before, beforeEach, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createWalletClient, http, keccak256, pad } from 'viem';
+import { createWalletClient, http, InternalRpcError, keccak256, pad } from 'viem';
 import { acquireLock, applyPlan } from '../src/execution/index.ts';
 import { localSignerJournals } from '../src/execution/local-signer.ts';
 import { estimateGasLimit, feesFor } from '../src/execution/transactions.ts';
@@ -113,6 +113,28 @@ describe('apply on a private automining chain', () => {
   });
   afterEach(async () => {
     await chain.rpc('evm_revert', [snapshot]);
+  });
+
+  test('a transient receipt failure completes deployment without another signature', async () => {
+    const input = await planFor();
+    const ws = await workspace();
+    let failed = false;
+    const client = Object.assign(Object.create(chain.client), {
+      async getTransactionReceipt(request) {
+        const receipt = await chain.client.getTransactionReceipt(request);
+        if (!failed) {
+          failed = true;
+          throw new InternalRpcError(new Error('temporarily unavailable'));
+        }
+        return receipt;
+      },
+    });
+    const result = await apply(input, ws, { client, receiptTimeoutMs: 5_000 });
+    const writes = input.plan.resources.filter((resource) => resource.action !== 'reuse').length;
+    assert.equal(failed, true);
+    assert.equal(result.status, 'applied');
+    assert.equal(result.transactionsSigned, writes);
+    assert.equal(count(await journalOf(ws.journalFile), 'signed'), writes);
   });
 
   test('sequential apply deploys each resource once, and a rerun or a new plan sends nothing', async (t) => {

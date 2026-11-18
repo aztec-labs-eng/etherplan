@@ -63,6 +63,40 @@ export function safeRpcMessage(
   return 'RPC request failed.';
 }
 
+/** Retry temporary read failures, using structured metadata rather than provider message text. */
+export function isTransientRpcError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let transient = false;
+  for (
+    let current = error;
+    current && typeof current === 'object' && !seen.has(current);
+    current = (current as { cause?: unknown }).cause
+  ) {
+    seen.add(current);
+    const { code, name, status } = current as { code?: unknown; name?: unknown; status?: unknown };
+    if (typeof status === 'number') {
+      if (![408, 429, 500, 502, 503, 504].includes(status)) return false;
+      transient = true;
+    }
+    if (typeof code === 'number') {
+      if (![-32603, -32002, -32005, -32007, 429].includes(code)) return false;
+      transient = true;
+    }
+    if (
+      (typeof name === 'string' &&
+        /^(?:HttpRequestError|WebSocketRequestError|TimeoutError|SocketClosedError|NetworkError|TransportError|FetchError)$/.test(
+          name,
+        )) ||
+      (typeof code === 'string' &&
+        /^(?:ETIMEDOUT|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EPIPE|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET)$/.test(
+          code,
+        ))
+    )
+      transient = true;
+  }
+  return transient;
+}
+
 export function isRpcError(error: unknown): boolean {
   const seen = new Set<unknown>();
   for (

@@ -951,6 +951,8 @@ export interface WaitForReceiptInput {
   nonce: DecimalString | number;
   pollIntervalMs: number;
   timeoutMs: number;
+  /** The enclosing receipt deadline, when timeoutMs is a shorter pipeline polling slice. */
+  retryDeadline?: number;
   /** The apply's receipt timeout. It limits the wait for a receipt after the nonce shows as used. */
   receiptTimeoutMs: number;
 }
