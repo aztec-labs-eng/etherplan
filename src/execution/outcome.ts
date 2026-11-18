@@ -234,6 +234,17 @@ export async function precondition(
     );
   }
   const verification = await verifyCurrent(ctx, item);
+  if (planned.action === 'verify') {
+    if (verification.status !== 'verified')
+      return fail(
+        ctx,
+        item,
+        'conflict',
+        'The workspace external is absent or does not match its pin.',
+        { evidence: summarizeVerification(verification) },
+      );
+    return { satisfied: true, verification };
+  }
   const observed = (verification.bindingChecks ?? []).map((check) => check.observed);
   if (
     verification.status === 'verified' &&

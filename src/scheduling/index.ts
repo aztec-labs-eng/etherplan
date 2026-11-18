@@ -18,7 +18,7 @@ import type {
 export const PERMISSIONLESS_FACTORY_CODE_HASHES = new Set([
   '0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989',
 ]);
-const APPLICABLE = new Set(['reuse', 'deploy', 'call']);
+const APPLICABLE = new Set(['reuse', 'deploy', 'call', 'verify']);
 const OWNER_LANE = 'owner';
 
 /** An action with its lane and plan position, before a batch assigns its signer. */
@@ -47,7 +47,7 @@ export function executionWaves(resources: SchedulableResource[]): ExecutionWaves
   );
   const remaining = new Map(
     resources
-      .filter((resource) => ['deploy', 'call'].includes(resource.action))
+      .filter((resource) => ['deploy', 'call', 'verify'].includes(resource.action))
       .map((resource): [ResourceId, SchedulableResource] => [resource.id, resource]),
   );
   const waves: ResourceId[][] = [];
@@ -187,7 +187,7 @@ export function createSchedule(
   const actions = plan.resources.flatMap((resource, order): PendingAction[] => {
     const { action } = resource;
     // `blocked` is empty, so every action that is not a reuse is a deploy or a call.
-    if (action !== 'deploy' && action !== 'call') return [];
+    if (action !== 'deploy' && action !== 'call' && action !== 'verify') return [];
     const { role, lane } = laneFor(resource, primary, ownerLane, named);
     const pooled = parallel && pool.length > 1 && poolable(resource);
     return [

@@ -342,11 +342,16 @@ export function parseSpec(raw: unknown): ParsedSpec {
   for (const [name, external] of Object.entries(spec.externals)) {
     assertId(name, `External name ${name}`);
     assert(isObject(external), `External ${name} must be an object.`);
-    assertKeys(external, new Set(['address', 'codeHash', 'checks', 'abi']), `External ${name}`);
+    assertKeys(
+      external,
+      new Set(['address', 'codeHash', 'checks', 'abi', 'after']),
+      `External ${name}`,
+    );
     assert(
       typeof external.address === 'string' && isAddress(external.address),
       `External ${name} needs an address.`,
     );
+    if (external.after !== undefined) assertAfter(external.after, `External ${name}`);
     if (external.codeHash !== undefined) assertHash(external.codeHash, `External ${name} codeHash`);
     if (external.checks !== undefined) assertChecks(external.checks, `External ${name} checks`);
     if (external.abi !== undefined)
@@ -373,6 +378,7 @@ export function parseSpec(raw: unknown): ParsedSpec {
         'codeHash',
         'creationProofMode',
         'createdCode',
+        'identityId',
         'signerRole',
         'senderIndependent',
         'ignoreMetadata',
@@ -380,6 +386,12 @@ export function parseSpec(raw: unknown): ParsedSpec {
       `Contract ${item.id ?? '<unknown>'}`,
     );
     assertId(item.id, 'Contract ID');
+    if (item.identityId !== undefined)
+      assert(
+        typeof item.identityId === 'string' &&
+          /^contract:[a-z][a-zA-Z0-9_]*$/.test(item.identityId),
+        'Contract identityId must be a contract ID.',
+      );
     const fullId = `contract:${item.id}`;
     assert(!ids.has(fullId), `Duplicate ${fullId}.`);
     ids.add(fullId);
@@ -684,7 +696,7 @@ export function graph(spec: ParsedSpec): OrderedNode[] {
       addEdge(resolution, target, 'call target address');
       addEdge(execution, target, 'live call target');
     }
-    const after = node.kind === 'external' ? undefined : node.item.after;
+    const after = node.item.after;
     for (const dependency of after ?? []) addEdge(execution, dependency, 'explicit after');
     if (
       node.kind === 'call' &&

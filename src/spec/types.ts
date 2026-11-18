@@ -41,6 +41,7 @@ export interface SpecCreatedCode {
 }
 
 export interface SpecContract {
+  identityId?: `contract:${string}`;
   id: string;
   /** Path ending in `.json`, relative to the spec file. */
   artifact: string;
@@ -68,6 +69,7 @@ export interface SpecContract {
 }
 
 export interface SpecExternal {
+  after?: ResourceId[];
   address: Address;
   codeHash?: Hash;
   checks?: SpecChecks;

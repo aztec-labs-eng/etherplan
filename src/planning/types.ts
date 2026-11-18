@@ -74,6 +74,7 @@ export interface PreparedExternal extends PreparedBase {
 }
 
 export interface PreparedContract extends PreparedBase {
+  identityId?: ContractId;
   id: ContractId;
   kind: 'contract';
   artifact: NormalizedArtifact;
@@ -139,7 +140,7 @@ export interface PlannedTransaction {
   value: DecimalString;
 }
 
-export type PlanAction = 'reuse' | 'deploy' | 'call' | 'conflict' | 'unverified';
+export type PlanAction = 'reuse' | 'deploy' | 'call' | 'verify' | 'conflict' | 'unverified';
 
 /** Why a plan accepts a rebuilt artifact for an unchanged CREATE2 deployment, or why it does not. */
 export interface ArtifactDrift {
@@ -208,6 +209,7 @@ interface PlannedBase {
 }
 
 export interface PlannedContract extends PlannedBase {
+  identityId?: ContractId;
   kind: 'contract';
   artifactHash: Hash;
   initcodeHash?: Hash;
@@ -261,6 +263,7 @@ export interface PlanPipeline extends PlanSigners {
 }
 
 interface PlanBase {
+  workspace?: import('../workspace/types.ts').WorkspaceMetadata;
   chain: ChainIdentity;
   observed: { blockNumber: DecimalString; blockHash: Hash };
   /** Hash of the state the plan was created against (`hashJson(null)` when there was none). */
@@ -306,6 +309,7 @@ export interface PlanSignerInput {
 }
 
 export interface CreatePlanInput {
+  pendingExternals?: ReadonlySet<ResourceId>;
   /** Raw or already parsed; createPlan calls parseSpec either way. */
   spec: unknown;
   artifacts: Artifacts;

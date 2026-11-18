@@ -37,6 +37,8 @@ import type {
 
 /** Initialized once after the lock and journal are open; run fills the preflight fields. */
 export interface ApplyContext {
+  ownedJournalFiles?: string[];
+  ownedScopes?: DeploymentScope[];
   plan: Plan;
   spec: unknown;
   artifacts: Artifacts;
@@ -181,28 +183,37 @@ export interface OpenedApplyContext {
   close(): Promise<void>;
 }
 
-export async function openApplyContext({
-  plan,
-  spec,
-  artifacts,
-  client,
-  verificationClient,
-  signers,
-  signerProvider,
-  signerRoles,
-  stateStore,
-  journalStore,
-  lockProvider,
-  journalCipher,
-  scope: scopeInput,
-  principal,
-  ttlMs,
-  stateFile,
-  journalFile,
-  parallel = false,
-  pipeline = false,
-  ...options
-}: ApplyInput): Promise<OpenedApplyContext> {
+export type ApplyRuntime = Pick<ApplyContext, 'lock' | 'journal' | 'readState' | 'writeState'> &
+  Partial<Pick<ApplyContext, 'ownedJournalFiles' | 'ownedScopes'>>;
+export type RuntimeFactory = (addresses: Address[]) => Promise<ApplyRuntime>;
+
+export async function openApplyContext(
+  {
+    plan,
+    spec,
+    artifacts,
+    client,
+    verificationClient,
+    signers,
+    signerProvider,
+    signerRoles,
+    stateStore,
+    journalStore,
+    lockProvider,
+    journalCipher,
+    scope: scopeInput,
+    principal,
+    ttlMs,
+    stateFile,
+    journalFile,
+    parallel = false,
+    pipeline = false,
+    ...options
+  }: ApplyInput,
+  runtimeFactory?: RuntimeFactory,
+): Promise<OpenedApplyContext> {
+  if (plan.workspace && !runtimeFactory)
+    throw new ApplyError('config', 'A workspace plan requires applyWorkspacePlan.');
   for (const name of ['receiptTimeoutMs', 'verificationTimeoutMs'] as const) {
     const value = options[name];
     if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
@@ -300,45 +311,51 @@ export async function openApplyContext({
   const lockStarted = Date.now();
   const emitLeaseEvent = (event: ReportEvent) =>
     typeof config.reporter === 'function' ? config.reporter(event) : config.reporter?.emit(event);
-  const localLocks = backend
-    ? null
-    : await acquireLocalApplyLocks(
-        stateFile!,
-        journalFile!,
-        typeof plan.planHash === 'string' ? plan.planHash : null,
-        plan.chain,
-        [...lanes.byAddress.keys()] as Address[],
-      );
-  const lock = backend
-    ? await acquireLeases({
-        lockProvider: backend.lockProvider,
-        scope: backend.scope,
-        addresses: [...lanes.byAddress.keys()] as Address[],
-        planHash: plan.planHash,
-        principal,
-        ttlMs,
-        onRenew: (event) =>
-          emitLeaseEvent({
-            type: 'lock-renewal',
-            at: new Date().toISOString(),
-            planHash: plan.planHash,
-            chain: plan.chain,
-            scope: backend.scope,
-            principal: event.holder.principal,
-          }),
-        onRenewFailure: (event) =>
-          emitLeaseEvent({
-            type: 'lock-renewal-failure',
-            at: new Date().toISOString(),
-            planHash: plan.planHash,
-            chain: plan.chain,
-            scope: backend.scope,
-            principal: event.holder.principal,
-            reason: event.failure,
-            fatal: event.fatal,
-          }),
-      })
-    : localLocks!.lock;
+  const runtime = runtimeFactory
+    ? await runtimeFactory([...lanes.byAddress.keys()] as Address[])
+    : null;
+  const localLocks =
+    backend || runtime
+      ? null
+      : await acquireLocalApplyLocks(
+          stateFile!,
+          journalFile!,
+          typeof plan.planHash === 'string' ? plan.planHash : null,
+          plan.chain,
+          [...lanes.byAddress.keys()] as Address[],
+        );
+  const lock =
+    runtime?.lock ??
+    (backend
+      ? await acquireLeases({
+          lockProvider: backend.lockProvider,
+          scope: backend.scope,
+          addresses: [...lanes.byAddress.keys()] as Address[],
+          planHash: plan.planHash,
+          principal,
+          ttlMs,
+          onRenew: (event) =>
+            emitLeaseEvent({
+              type: 'lock-renewal',
+              at: new Date().toISOString(),
+              planHash: plan.planHash,
+              chain: plan.chain,
+              scope: backend.scope,
+              principal: event.holder.principal,
+            }),
+          onRenewFailure: (event) =>
+            emitLeaseEvent({
+              type: 'lock-renewal-failure',
+              at: new Date().toISOString(),
+              planHash: plan.planHash,
+              chain: plan.chain,
+              scope: backend.scope,
+              principal: event.holder.principal,
+              reason: event.failure,
+              fatal: event.fatal,
+            }),
+        })
+      : localLocks!.lock);
   const fence = 'fence' in lock ? lock.fence : null;
   signerControl.fence = fence;
   signerControl.assertHeld = () => lock.assertHeld();
@@ -351,29 +368,39 @@ export async function openApplyContext({
     }
   };
   try {
-    journal = backend
-      ? await openStoredJournal({
-          journalStore: backend.journalStore,
-          journalCipher: backend.journalCipher,
-          scope: backend.scope,
-          fence,
-          assertHeld: () => lock.assertHeld(),
-        })
-      : await openJournal(journalFile!, { writerLock: localLocks!.journalLock });
-    const readState: ApplyContext['readState'] = backend
-      ? async () => {
-          const found = await backend.stateStore.read(backend.scope);
-          return {
-            version: found?.version ?? null,
-            value: found ? validateState(found.value) : null,
-          };
-        }
-      : async () => ({ version: null, value: await deps.readState(stateFile!) });
-    const writeState: ApplyContext['writeState'] = backend
-      ? (version, state) =>
-          backend.stateStore.compareAndSwap(backend.scope, version, validateState(state), { fence })
-      : (_version, state) => deps.writeStateAtomic(stateFile!, state);
+    journal =
+      runtime?.journal ??
+      (backend
+        ? await openStoredJournal({
+            journalStore: backend.journalStore,
+            journalCipher: backend.journalCipher,
+            scope: backend.scope,
+            fence,
+            assertHeld: () => lock.assertHeld(),
+          })
+        : await openJournal(journalFile!, { writerLock: localLocks!.journalLock }));
+    const readState: ApplyContext['readState'] =
+      runtime?.readState ??
+      (backend
+        ? async () => {
+            const found = await backend.stateStore.read(backend.scope);
+            return {
+              version: found?.version ?? null,
+              value: found ? validateState(found.value) : null,
+            };
+          }
+        : async () => ({ version: null, value: await deps.readState(stateFile!) }));
+    const writeState: ApplyContext['writeState'] =
+      runtime?.writeState ??
+      (backend
+        ? (version, state) =>
+            backend.stateStore.compareAndSwap(backend.scope, version, validateState(state), {
+              fence,
+            })
+        : (_version, state) => deps.writeStateAtomic(stateFile!, state));
     const ctx: ApplyContext = {
+      ...(runtime?.ownedJournalFiles ? { ownedJournalFiles: runtime.ownedJournalFiles } : {}),
+      ...(runtime?.ownedScopes ? { ownedScopes: runtime.ownedScopes } : {}),
       plan,
       spec,
       artifacts,

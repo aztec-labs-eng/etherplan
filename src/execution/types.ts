@@ -216,6 +216,7 @@ export interface Leases {
 export type Lock = LocalLock | Leases;
 
 export interface AcquireLeasesInput {
+  additionalScopes?: DeploymentScope[];
   lockProvider: LockProvider;
   scope: DeploymentScope;
   addresses: Address[];
@@ -551,6 +552,7 @@ export type JournalPhaseFields =
   | FailedFields;
 
 export interface JournalIdentity {
+  workspaceSequence?: number;
   planHash: Hash;
   chain: ChainIdentity;
   actionId: ResourceId;

@@ -87,6 +87,7 @@ function planResource(
   copyDefined(result, resource, ['resolutionDependencies', 'executionEdges']);
   if (resource.kind === 'contract') {
     copyDefined(result, resource, [
+      'identityId',
       'artifactHash',
       'initcodeHash',
       'inputsHash',
@@ -351,6 +352,7 @@ export async function createPlan({
   client,
   state = null,
   journalRecords = [],
+  pendingExternals = new Set(),
   onResourceCheck,
   pipeline = null,
   signers = null,
@@ -446,6 +448,19 @@ export async function createPlan({
     let action: PlanAction = stateComparison?.conflict
       ? 'conflict'
       : decide(resource, verification, plannedById);
+    if (
+      resource.kind === 'external' &&
+      pendingExternals.has(resource.id) &&
+      verification.codeComparison?.mode === 'absent'
+    )
+      action = 'verify';
+    if (
+      resource.kind === 'call' &&
+      plannedById.get(resource.targetId)?.action === 'verify' &&
+      bindingState(verification) === 'read-failed' &&
+      verification.bindingChecks?.[0]?.targetAbsent
+    )
+      action = 'call';
     if (resource.kind === 'contract' && action === 'deploy')
       await assertPinnedAbsent(client, resource, observed.number);
     // A predicted CREATE2 address is not an adopted deployment merely because

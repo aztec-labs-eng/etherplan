@@ -14,6 +14,7 @@ export type CliOptions = {
   deployers?: string;
   owner?: Address;
   'named-signers'?: string;
+  'workspace-manifest'?: string;
   'max-spend-wei'?: string;
   'max-fee-per-gas'?: string;
   'priority-fee-per-gas'?: string;
@@ -60,6 +61,7 @@ export const COMMANDS = {
   plan: {
     description: 'Inspect the chain and save a reviewable plan.',
     options: [
+      'workspace-manifest',
       'out',
       'state',
       'journal',
@@ -152,6 +154,7 @@ const OPTION_HELP = {
   reconfigure: 'Accept a changed backend configuration for this project',
   deployers: 'Comma-separated deployer addresses',
   owner: 'Owner signer address for planning or scheduling',
+  'workspace-manifest': 'JSON manifest of project/workspace units and cross-unit links',
   'named-signers': 'JSON object mapping named signer roles to addresses',
   'max-spend-wei': 'Reviewed maximum total cost in wei per signer for a write plan',
   'max-fee-per-gas':
@@ -179,6 +182,7 @@ const OPTION_HELP = {
     'Workspace for separate state and main.<name>.ethpvars (default: ETHP_WORKSPACE or default)',
 };
 const VALUE_OPTIONS = new Set([
+  'workspace-manifest',
   'value',
   'out',
   'plan',

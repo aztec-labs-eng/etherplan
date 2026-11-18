@@ -307,6 +307,7 @@ type JsonSafeInput = ReturnType<typeof jsonSafe<Parameters<Journal['append']>[0]
 };
 
 export async function acquireLeases({
+  additionalScopes = [],
   lockProvider,
   scope,
   addresses,
@@ -332,7 +333,14 @@ export async function acquireLeases({
   // Local view of the lease deadline, measured from when each successful request started.
   let validUntil = Date.now() + ttlMs;
   try {
-    for (const lockScope of lockScopes(scope, addresses))
+    const deployments = [scope, ...additionalScopes].sort((a, b) =>
+      scopeKey(a).localeCompare(scopeKey(b)),
+    );
+    const scopes = [
+      ...deployments.map((value) => lockScopes(value, [])[0]),
+      ...lockScopes(scope, addresses).slice(1),
+    ];
+    for (const lockScope of scopes)
       acquired.push({
         scope: lockScope,
         lease: await lockProvider.acquire(lockScope, holder, ttlMs),

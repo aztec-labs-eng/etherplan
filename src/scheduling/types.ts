@@ -50,7 +50,7 @@ export type Lane = Address | 'owner';
 
 export interface ScheduleEntry {
   id: ResourceId;
-  action: 'deploy' | 'call';
+  action: 'deploy' | 'call' | 'verify';
   kind: ResourceKind;
   address: Address;
   signerRole: LaneRole;
@@ -83,7 +83,7 @@ export interface ScheduleLane {
 
 export interface OwnerAction {
   id: ResourceId;
-  action: 'deploy' | 'call';
+  action: 'deploy' | 'call' | 'verify';
   wave: number;
   signer: Lane;
 }

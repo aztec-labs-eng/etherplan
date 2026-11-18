@@ -150,6 +150,7 @@ function buildContract(
     signerRole: item.signerRole ?? 'deployer',
     senderIndependent: item.senderIndependent ?? false,
   };
+  if (item.identityId) resource.identityId = item.identityId;
   if (Object.keys(libraries).length > 0) resource.libraries = libraries;
   if (item.codeHash !== undefined) resource.expectedCodeHash = item.codeHash;
   if (item.ignoreMetadata) resource.ignoreMetadata = true;

@@ -27,7 +27,7 @@ export function pinnedCommitment(planHash: Hash, resource: PreparedContract): Ha
     throw new Error(`${resource.id} has no complete pinned-runtime commitment.`);
   return hashJson({
     planHash,
-    id: resource.id,
+    id: resource.identityId ?? resource.id,
     address: resource.address,
     initcodeHash: resource.initcodeHash,
     inputsHash: resource.inputsHash,

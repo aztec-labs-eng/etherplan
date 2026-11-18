@@ -35,8 +35,9 @@ import type {
 } from '../types.ts';
 import type { PlanIdentityInput, PreparedAction } from './types.ts';
 
-const APPLICABLE = new Set(['reuse', 'deploy', 'call']);
+const APPLICABLE = new Set(['reuse', 'deploy', 'call', 'verify']);
 const IDENTITY_FIELDS = [
+  'identityId',
   'kind',
   'dependencies',
   'resolutionDependencies',
