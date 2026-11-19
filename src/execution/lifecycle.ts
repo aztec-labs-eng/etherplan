@@ -42,15 +42,10 @@ async function runBatch(ctx: ApplyContext, wave: number, batch: ScheduleEntry[])
     throw new ApplyError('schedule', `Wave ${wave} has a batch with two actions for one signer.`);
   const work = await prepareBatch(ctx, batch);
   if (work.length === 0) return;
-  if (ctx.pipeline && work.length !== batch.length)
-    throw new ApplyError(
-      'stale-pipeline',
-      `Wave ${wave} no longer matches its saved nonce offsets. Create a new pipeline plan.`,
-    );
   await checkBatchFunding(ctx, work);
   if (ctx.pipeline) {
-    // createSchedule gives pipeline entries saved offsets; signPipelineBatch checks each
-    // group against its reserved sequence before it records an intent.
+    // prepareBatch leaves out an action that the chain already satisfies. signPipelineBatch
+    // reserves consecutive nonces for the actions that remain, in their saved order.
     const signingStart = Date.now();
     const signed = await signPipelineBatch(ctx, { wave, work: work as PipelineFundedJob[] });
     ctx.timings.submitMs += Date.now() - signingStart;

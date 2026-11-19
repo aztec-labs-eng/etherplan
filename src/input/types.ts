@@ -138,6 +138,7 @@ export interface ConfigOptions {
   'max-fee-per-gas'?: string;
   'priority-fee-per-gas'?: string;
   'gas-multiplier'?: string;
+  'base-fee-multiplier'?: string;
   'receipt-timeout-ms'?: string;
   'verification-timeout-ms'?: string;
 }

@@ -17,6 +17,7 @@ export type CliOptions = {
   'max-fee-per-gas'?: string;
   'priority-fee-per-gas'?: string;
   'gas-multiplier'?: string;
+  'base-fee-multiplier'?: string;
   'replace-max-fee-per-gas'?: string;
   'replace-priority-fee-per-gas'?: string;
   'replace-max-cost-wei'?: string;
@@ -88,6 +89,7 @@ export const COMMANDS = {
       'max-fee-per-gas',
       'priority-fee-per-gas',
       'gas-multiplier',
+      'base-fee-multiplier',
       'replace-max-fee-per-gas',
       'replace-priority-fee-per-gas',
       'replace-max-cost-wei',
@@ -120,6 +122,10 @@ export const COMMANDS = {
     description: 'Inspect a deployment in the production backend.',
     options: ['plan', 'backend'],
   },
+  unfinished: {
+    description: 'Find the saved plan that an interrupted apply must resume.',
+    options: ['backend', 'out'],
+  },
 };
 const OPTION_HELP = {
   value: 'Value name for impact',
@@ -136,10 +142,13 @@ const OPTION_HELP = {
   deployers: 'Comma-separated deployer addresses',
   owner: 'Owner signer address for planning or scheduling',
   'max-spend-wei': 'Reviewed maximum total cost in wei per signer for a write plan',
-  'max-fee-per-gas': 'Maximum fee per gas in wei for new transactions (default: RPC estimate)',
+  'max-fee-per-gas':
+    'Maximum fee per gas in wei for new transactions (default: --base-fee-multiplier times the base fee, plus the priority fee)',
   'priority-fee-per-gas':
     'Priority fee per gas in wei for new transactions (default: RPC estimate)',
   'gas-multiplier': 'Gas limit as a multiple of the RPC gas estimate, at least 1 (default: 1.2)',
+  'base-fee-multiplier':
+    'Maximum fee per gas as a multiple of the latest base fee, at least 1, when --max-fee-per-gas is not set (default: 2)',
   'replace-max-fee-per-gas': 'Replacement transaction maximum fee per gas in wei',
   'replace-priority-fee-per-gas': 'Replacement transaction priority fee per gas in wei',
   'replace-max-cost-wei': 'Maximum cost in wei for each replacement transaction',
@@ -173,6 +182,7 @@ const VALUE_OPTIONS = new Set([
   'max-fee-per-gas',
   'priority-fee-per-gas',
   'gas-multiplier',
+  'base-fee-multiplier',
   'replace-max-fee-per-gas',
   'replace-priority-fee-per-gas',
   'replace-max-cost-wei',
@@ -191,7 +201,7 @@ const BOOLEAN_OPTIONS = new Set([
 ]);
 export const SPEC_COMMANDS = Object.fromEntries(
   Object.entries(COMMANDS)
-    .filter(([name]) => name !== 'status')
+    .filter(([name]) => name !== 'status' && name !== 'unfinished')
     .map(([name, details]) => [name, details.options]),
 );
 
@@ -211,17 +221,19 @@ export function usage(command?: CommandName): string {
   const describe = (name: keyof typeof OPTION_HELP) =>
     name === 'out' && command === 'plan'
       ? 'Local plan file (default: ./plan.json; - skips the local file)'
-      : name === 'out'
-        ? 'Adapter directory (default: ./generated)'
-        : name === 'plan' && command === 'apply'
-          ? 'Saved plan file; omit to create and approve a fresh plan'
-          : name === 'plan' && command === 'status'
-            ? 'Saved plan file (default: ./plan.json)'
-            : OPTION_HELP[name];
+      : name === 'out' && command === 'unfinished'
+        ? 'File for the unfinished saved plan; not written when no plan is unfinished'
+        : name === 'out'
+          ? 'Adapter directory (default: ./generated)'
+          : name === 'plan' && command === 'apply'
+            ? 'Saved plan file; omit to create and approve a fresh plan'
+            : name === 'plan' && command === 'status'
+              ? 'Saved plan file (default: ./plan.json)'
+              : OPTION_HELP[name];
   const environment =
     command === 'apply'
       ? '\n\nRequires ETH_RPC_URL. ETH_VERIFICATION_RPC_URL optionally selects an independent deployment-verification RPC.'
-      : ['init', 'plan', 'verify', 'schedule', 'import'].includes(command)
+      : ['init', 'plan', 'verify', 'schedule', 'import', 'unfinished'].includes(command)
         ? '\n\nRequires ETH_RPC_URL.'
         : command === 'output'
           ? '\n\n--backend requires ETH_RPC_URL.'
@@ -231,7 +243,7 @@ export function usage(command?: CommandName): string {
       ? ' Without --signer-module, local apply reads DEPLOYER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEYS and, for owner calls, OWNER_PRIVATE_KEY.'
       : '';
   const project =
-    command === 'status'
+    command === 'status' || command === 'unfinished'
       ? ''
       : '\nRun from a directory containing main.ethp; all root-level .ethp files form one project.';
   return `Usage: etherplan ${command} [options]\n\n${details.description}${project}\n\nOptions:\n${details.options.map((name) => `  --${name.padEnd(12)} ${describe(name as keyof typeof OPTION_HELP)}`).join('\n')}\n  --help         Show this help${environment}${signers}`;
@@ -315,6 +327,7 @@ const WHOLE = /^[0-9]+$/;
 // Config can supply these, so the checks run on the merged options.
 function validateApplyValues(options: CliOptions): void {
   for (const name of [
+    'max-spend-wei',
     'max-fee-per-gas',
     'priority-fee-per-gas',
     'receipt-timeout-ms',
@@ -330,6 +343,8 @@ function validateApplyValues(options: CliOptions): void {
       );
     }
   }
+  if (options['max-spend-wei'] !== undefined && BigInt(options['max-spend-wei']) === 0n)
+    throw new UsageError('--max-spend-wei must be positive.');
   const maxFee = options['max-fee-per-gas'];
   const priorityFee = options['priority-fee-per-gas'];
   if ((maxFee === undefined) !== (priorityFee === undefined))
@@ -340,11 +355,13 @@ function validateApplyValues(options: CliOptions): void {
     throw new UsageError('--max-fee-per-gas must be positive.');
   if (maxFee !== undefined && BigInt(priorityFee!) > BigInt(maxFee))
     throw new UsageError('--priority-fee-per-gas cannot exceed --max-fee-per-gas.');
-  const multiplier = options['gas-multiplier'];
-  if (
-    multiplier !== undefined &&
-    (!/^[0-9]+(?:\.[0-9]+)?$/.test(multiplier) || Number(multiplier) < 1)
-  ) {
-    throw new UsageError('--gas-multiplier must be a decimal number no less than 1, such as 1.5.');
+  for (const name of ['gas-multiplier', 'base-fee-multiplier'] as const) {
+    const multiplier = options[name];
+    if (
+      multiplier !== undefined &&
+      (!/^[0-9]+(?:\.[0-9]+)?$/.test(multiplier) || Number(multiplier) < 1)
+    ) {
+      throw new UsageError(`--${name} must be a decimal number no less than 1, such as 1.5.`);
+    }
   }
 }

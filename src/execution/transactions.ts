@@ -9,6 +9,7 @@ import type { TransactionSerialized } from 'viem';
 import type { PlannedResource } from '../planning/types.ts';
 import type { Address, Client, DecimalString, Hash, Hex } from '../types.ts';
 import type {
+  ApplyConfig,
   BroadcastOutcome,
   EstimateGasInput,
   FeeOverride,
@@ -23,7 +24,7 @@ import type {
   TransactionEnvelope,
   WaitForReceiptInput,
 } from './types.ts';
-import { classifyRpcFailure, safeRpcMessage } from './rpc-error.ts';
+import { classifyRpcFailure, isTransientRpcError, safeRpcMessage } from './rpc-error.ts';
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -34,14 +35,32 @@ function toBigInt(value: unknown, name: string): bigint {
   throw new Error(`${name} must be a non-negative integer.`);
 }
 
+export const DEFAULT_BASE_FEE_MULTIPLIER = 2;
+
+/**
+ * Without an override, the cap is the latest block's base fee times `baseFeeMultiplier`, plus the RPC's priority
+ * fee. The base fee can rise 12.5% per block, and a transaction waits while the base fee is above its cap, so the
+ * multiple is the headroom that keeps a signed transaction includable. The chain charges the base fee of the
+ * including block, not the cap.
+ */
 export async function feesFor(
   client: Client,
   override?: FeeOverride | null,
+  baseFeeMultiplier: number = DEFAULT_BASE_FEE_MULTIPLIER,
 ): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }> {
-  const fees = override ?? (await client.estimateFeesPerGas());
+  if (override)
+    return {
+      maxFeePerGas: toBigInt(override.maxFeePerGas, 'maxFeePerGas'),
+      maxPriorityFeePerGas: toBigInt(override.maxPriorityFeePerGas, 'maxPriorityFeePerGas'),
+    };
+  const [block, estimate] = await Promise.all([client.getBlock(), client.estimateFeesPerGas()]);
+  if (typeof block.baseFeePerGas !== 'bigint')
+    throw new Error('The latest block has no base fee; the chain does not support EIP-1559 fees.');
+  const maxPriorityFeePerGas = toBigInt(estimate.maxPriorityFeePerGas, 'maxPriorityFeePerGas');
+  const scale = BigInt(Math.round(baseFeeMultiplier * 1000));
   return {
-    maxFeePerGas: toBigInt(fees.maxFeePerGas, 'maxFeePerGas'),
-    maxPriorityFeePerGas: toBigInt(fees.maxPriorityFeePerGas, 'maxPriorityFeePerGas'),
+    maxFeePerGas: (block.baseFeePerGas * scale + 999n) / 1000n + maxPriorityFeePerGas,
+    maxPriorityFeePerGas,
   };
 }
 
@@ -216,11 +235,57 @@ export async function broadcast(client: Client, rawTransaction: Hex): Promise<Br
   }
 }
 
-export async function findReceipt(client: Client, hash: Hash): Promise<Receipt | null> {
+export interface ReceiptRetryOptions {
+  deadline: number;
+  pollIntervalMs: number;
+}
+
+export function receiptRetryOptions(
+  config: Pick<ApplyConfig, 'receiptTimeoutMs' | 'pollIntervalMs'>,
+  deadline = Date.now() + config.receiptTimeoutMs,
+): ReceiptRetryOptions {
+  return { deadline, pollIntervalMs: config.pollIntervalMs };
+}
+
+// Retries a read only. The shared deadline bounds retries; the transport still controls each
+// in-flight request's timeout. An exhausted read rethrows, so it never stands in for an answer.
+export async function retryRead<T>(
+  read: () => Promise<T>,
+  retry?: ReceiptRetryOptions,
+): Promise<T> {
+  for (;;) {
+    try {
+      return await read();
+    } catch (error) {
+      if (!retry || !isTransientRpcError(error) || Date.now() >= retry.deadline) throw error;
+      await sleep(Math.min(retry.pollIntervalMs, Math.max(0, retry.deadline - Date.now())));
+      if (Date.now() >= retry.deadline) throw error;
+    }
+  }
+}
+
+export async function findReceipt(
+  client: Client,
+  hash: Hash,
+  retry?: ReceiptRetryOptions,
+): Promise<Receipt | null> {
   try {
-    return await client.getTransactionReceipt({ hash });
+    return await retryRead(() => client.getTransactionReceipt({ hash }), retry);
   } catch (error) {
-    if ((error as Error).name === 'TransactionReceiptNotFoundError') return null;
+    if ((error as Error)?.name === 'TransactionReceiptNotFoundError') return null;
+    throw error;
+  }
+}
+
+export async function findBlock(
+  client: Client,
+  blockNumber: bigint,
+  retry?: ReceiptRetryOptions,
+): Promise<{ hash: Hash } | null> {
+  try {
+    return await retryRead(() => client.getBlock({ blockNumber }), retry);
+  } catch (error) {
+    if ((error as Error)?.name === 'BlockNotFoundError') return null;
     throw error;
   }
 }
@@ -228,35 +293,87 @@ export async function findReceipt(client: Client, hash: Hash): Promise<Receipt |
 export async function findKnownReceipt(
   client: Client,
   signedVariants: { transactionHash: Hash }[],
+  retry?: ReceiptRetryOptions,
 ): Promise<Receipt | null> {
   for (const signed of signedVariants) {
-    const receipt = await findReceipt(client, signed.transactionHash);
+    const receipt = await findReceipt(client, signed.transactionHash, retry);
     if (receipt) return receipt;
   }
   return null;
+}
+
+// Both counts come from one attempt, so a retry never pairs counts read at different times.
+export function signerNonces(
+  client: Client,
+  address: Address,
+  retry?: ReceiptRetryOptions,
+): Promise<[latest: number, pending: number]> {
+  return retryRead(
+    () =>
+      Promise.all([
+        client.getTransactionCount({ address, blockTag: 'latest' }),
+        client.getTransactionCount({ address, blockTag: 'pending' }),
+      ]),
+    retry,
+  );
 }
 
 export async function nonceConsumed(
   client: Client,
   signer: Address,
   nonce: DecimalString | number | bigint,
+  retry?: ReceiptRetryOptions,
 ): Promise<boolean> {
-  const latest = await client.getTransactionCount({ address: signer, blockTag: 'latest' });
+  const latest = await retryRead(
+    () => client.getTransactionCount({ address: signer, blockTag: 'latest' }),
+    retry,
+  );
   return BigInt(latest) > BigInt(nonce);
+}
+
+const MAX_NONCE_GRACE_MS = 30_000;
+
+// Call this after the nonce shows as used. An RPC node, for example behind a load balancer, can show
+// the used nonce before it has the receipt. Thus wait up to the receipt timeout, at most 30 seconds,
+// before deciding that a transaction outside the journal used the nonce.
+export async function receiptAfterNonceUse(
+  client: Client,
+  signedVariants: { transactionHash: Hash }[],
+  { pollIntervalMs, receiptTimeoutMs }: { pollIntervalMs: number; receiptTimeoutMs: number },
+): Promise<Receipt | null> {
+  const deadline = Date.now() + Math.min(receiptTimeoutMs, MAX_NONCE_GRACE_MS);
+  for (;;) {
+    const receipt = await findKnownReceipt(client, signedVariants, { deadline, pollIntervalMs });
+    if (receipt || Date.now() >= deadline) return receipt;
+    await sleep(pollIntervalMs);
+  }
 }
 
 // Waits until the transaction has a receipt, another transaction uses its nonce, or the timeout passes.
 export async function waitForReceipt(
   client: Client,
-  { hash, signedVariants, signer, nonce, pollIntervalMs, timeoutMs }: WaitForReceiptInput,
+  {
+    hash,
+    signedVariants,
+    signer,
+    nonce,
+    pollIntervalMs,
+    timeoutMs,
+    receiptTimeoutMs,
+    retryDeadline,
+  }: WaitForReceiptInput,
 ): Promise<ReceiptWait> {
   const deadline = Date.now() + timeoutMs;
   const variants = signedVariants ?? (hash === undefined ? [] : [{ transactionHash: hash }]);
+  const retry = { deadline: retryDeadline ?? deadline, pollIntervalMs };
   for (;;) {
-    const receipt = await findKnownReceipt(client, variants);
+    const receipt = await findKnownReceipt(client, variants, retry);
     if (receipt) return { receipt };
-    if (await nonceConsumed(client, signer, nonce)) {
-      const late = await findKnownReceipt(client, variants);
+    if (await nonceConsumed(client, signer, nonce, retry)) {
+      const late = await receiptAfterNonceUse(client, variants, {
+        pollIntervalMs,
+        receiptTimeoutMs,
+      });
       return late ? { receipt: late } : { dead: true };
     }
     if (Date.now() >= deadline) return { timeout: true };

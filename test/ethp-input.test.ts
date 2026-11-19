@@ -49,6 +49,7 @@ const COMMANDS = {
     'max-fee-per-gas',
     'priority-fee-per-gas',
     'gas-multiplier',
+    'base-fee-multiplier',
     'replace-max-fee-per-gas',
     'receipt-timeout-ms',
     'verification-timeout-ms',
@@ -660,9 +661,11 @@ command "apply" {
   max-fee-per-gas         = 30000000000
   priority-fee-per-gas    = "1000000000"
   gas-multiplier          = "1.5"
+  base-fee-multiplier     = "2.5"
   verification-timeout-ms = "600000"
 }`);
   assert.deepEqual(configOptions(parsed, 'apply', COMMANDS.apply), {
+    'base-fee-multiplier': '2.5',
     'gas-multiplier': '1.5',
     'max-fee-per-gas': '30000000000',
     'priority-fee-per-gas': '1000000000',
@@ -695,6 +698,10 @@ test('config rejects options that must stay explicit, options a command lacks, a
     [
       'command "apply" {\n gas-multiplier = "fast"\n}',
       /gas-multiplier must be a whole number or a quoted decimal, such as "1\.5"/,
+    ],
+    [
+      'command "apply" {\n base-fee-multiplier = "high"\n}',
+      /base-fee-multiplier must be a whole number or a quoted decimal, such as "1\.5"/,
     ],
     [
       'command "apply" {\n max-fee-per-gas = "30 gwei"\n}',

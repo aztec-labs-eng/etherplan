@@ -341,6 +341,26 @@ export interface InspectDeploymentInput {
   lockProvider: LockProvider;
 }
 
+export interface UnfinishedPlanInput {
+  scope: DeploymentScope;
+  journalStore: JournalStore;
+  planStore: PlanStore;
+}
+
+/** A saved plan with a transaction that may still reach the chain, from readUnfinishedPlan. */
+export interface UnfinishedPlan {
+  planHash: Hash;
+  plan: Plan;
+  /** The unfinished transactions, with the latest journal phase of each one. */
+  transactions: {
+    actionId: ResourceId;
+    phase: JournalPhase;
+    transactionHash: Hash;
+    signer: Address;
+    nonce: DecimalString;
+  }[];
+}
+
 export interface DeploymentStatus {
   scope: DeploymentScope;
   planHash: Hash | null;
@@ -633,7 +653,6 @@ export type ApplyErrorCode =
   | 'schedule'
   | 'stale-artifact'
   | 'stale-observation'
-  | 'stale-pipeline'
   | 'stale-resource'
   | 'stale-spec'
   | 'stale-state'
@@ -754,6 +773,8 @@ export interface ApplyOptions {
   /** Maximum time to retry provider failures while verifying a successful deployment. Defaults to five minutes. */
   verificationTimeoutMs?: number;
   gasMultiplier?: number;
+  /** Maximum fee per gas as a multiple of the latest base fee, plus the priority fee. Defaults to 2; `fees` replaces it. */
+  baseFeeMultiplier?: number;
   fees?: FeeOverride | null;
   /** Lowercase address to wei ceiling; the plan's `maxSpendWei` caps it. */
   budgets?: Record<string, bigint | number | string>;
@@ -771,6 +792,7 @@ export interface ApplyConfig {
   receiptTimeoutMs: number;
   verificationTimeoutMs: number;
   gasMultiplier: number;
+  baseFeeMultiplier: number;
   fees: FeeOverride | null;
   budgets: Record<string, bigint | number | string>;
   hooks: ApplyHooks;
@@ -929,6 +951,10 @@ export interface WaitForReceiptInput {
   nonce: DecimalString | number;
   pollIntervalMs: number;
   timeoutMs: number;
+  /** The enclosing receipt deadline, when timeoutMs is a shorter pipeline polling slice. */
+  retryDeadline?: number;
+  /** The apply's receipt timeout. It limits the wait for a receipt after the nonce shows as used. */
+  receiptTimeoutMs: number;
 }
 
 /** `dead`: another transaction used the nonce and no variant has a receipt. */

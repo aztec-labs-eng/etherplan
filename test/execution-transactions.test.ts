@@ -3,7 +3,7 @@ import test from 'node:test';
 import { keccak256 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { applyPlan } from '../src/execution/index.ts';
-import { signEnvelope, validateSignedTransaction } from '../src/execution/transactions.ts';
+import { feesFor, signEnvelope, validateSignedTransaction } from '../src/execution/transactions.ts';
 import { TEST_KEYS } from './execution/chain.ts';
 
 const account = privateKeyToAccount(TEST_KEYS[0]);
@@ -117,9 +117,39 @@ test('apply rejects invalid fee caps, gas multipliers, and timeouts before it op
     [{ fees: { maxFeePerGas: '1.5', maxPriorityFeePerGas: '1' } }, /fees needs/],
     [{ gasMultiplier: 0.9 }, /gasMultiplier must be a number no less than 1/],
     [{ gasMultiplier: Number.NaN }, /gasMultiplier must be/],
+    [{ baseFeeMultiplier: 0.9 }, /baseFeeMultiplier must be a number no less than 1/],
+    [{ baseFeeMultiplier: Number.POSITIVE_INFINITY }, /baseFeeMultiplier must be/],
     [{ receiptTimeoutMs: -1 }, /receiptTimeoutMs must be a non-negative integer/],
     [{ verificationTimeoutMs: 1.5 }, /verificationTimeoutMs must be a non-negative integer/],
   ];
   for (const [options, message] of cases)
     await assert.rejects(applyPlan(options), { code: 'config', message });
+});
+
+test('new transactions cap the fee at a multiple of the latest base fee plus the priority fee', async () => {
+  const feeClient = (baseFeePerGas) => ({
+    getBlock: async () => ({ baseFeePerGas }),
+    // The RPC estimate's own cap is ignored; only its priority fee is used.
+    estimateFeesPerGas: async () => ({ maxFeePerGas: 1n, maxPriorityFeePerGas: 7n }),
+  });
+  const client = feeClient(1_000_000_001n);
+  assert.deepEqual(await feesFor(client), {
+    maxFeePerGas: 2_000_000_009n,
+    maxPriorityFeePerGas: 7n,
+  });
+  // The product rounds up, so the cap is never below the requested multiple.
+  assert.deepEqual(await feesFor(client, null, 1.125), {
+    maxFeePerGas: 1_125_000_002n + 7n,
+    maxPriorityFeePerGas: 7n,
+  });
+  assert.deepEqual(await feesFor(client, null, 1), {
+    maxFeePerGas: 1_000_000_008n,
+    maxPriorityFeePerGas: 7n,
+  });
+  // Explicit fee caps replace the estimate, and the multiplier does not scale them.
+  assert.deepEqual(await feesFor(client, { maxFeePerGas: '30', maxPriorityFeePerGas: 2n }, 5), {
+    maxFeePerGas: 30n,
+    maxPriorityFeePerGas: 2n,
+  });
+  await assert.rejects(feesFor(feeClient(null)), /does not support EIP-1559 fees/);
 });

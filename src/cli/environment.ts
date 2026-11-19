@@ -131,7 +131,7 @@ function isPrivateKey(value: string): value is Hex {
 }
 export function publicClient(): Client {
   if (!process.env.ETH_RPC_URL)
-    throw new Error('Set ETH_RPC_URL for plan, schedule, verify, import, or apply.');
+    throw new Error('Set ETH_RPC_URL for plan, schedule, verify, import, apply, or unfinished.');
   return createPublicClient({ transport: http(process.env.ETH_RPC_URL) });
 }
 

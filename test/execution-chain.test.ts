@@ -5,10 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, afterEach, before, beforeEach, describe, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createWalletClient, http, keccak256, pad } from 'viem';
+import { createWalletClient, http, InternalRpcError, keccak256, pad } from 'viem';
 import { acquireLock, applyPlan } from '../src/execution/index.ts';
 import { localSignerJournals } from '../src/execution/local-signer.ts';
-import { estimateGasLimit } from '../src/execution/transactions.ts';
+import { estimateGasLimit, feesFor } from '../src/execution/transactions.ts';
 import { hashJson } from '../src/identity.ts';
 import { createPlan } from '../src/planning/index.ts';
 import { PROBE_ADDRESS, verifyResource } from '../src/verification/index.ts';
@@ -113,6 +113,28 @@ describe('apply on a private automining chain', () => {
   });
   afterEach(async () => {
     await chain.rpc('evm_revert', [snapshot]);
+  });
+
+  test('a transient receipt failure completes deployment without another signature', async () => {
+    const input = await planFor();
+    const ws = await workspace();
+    let failed = false;
+    const client = Object.assign(Object.create(chain.client), {
+      async getTransactionReceipt(request) {
+        const receipt = await chain.client.getTransactionReceipt(request);
+        if (!failed) {
+          failed = true;
+          throw new InternalRpcError(new Error('temporarily unavailable'));
+        }
+        return receipt;
+      },
+    });
+    const result = await apply(input, ws, { client, receiptTimeoutMs: 5_000 });
+    const writes = input.plan.resources.filter((resource) => resource.action !== 'reuse').length;
+    assert.equal(failed, true);
+    assert.equal(result.status, 'applied');
+    assert.equal(result.transactionsSigned, writes);
+    assert.equal(count(await journalOf(ws.journalFile), 'signed'), writes);
   });
 
   test('sequential apply deploys each resource once, and a rerun or a new plan sends nothing', async (t) => {
@@ -1033,6 +1055,26 @@ describe('apply on a private automining chain', () => {
     assert.equal(await nonce(deployerB), 1);
   });
 
+  test('new transactions cap the fee at the base-fee multiple, 2 by default', async () => {
+    for (const [options, multiple] of [
+      [{}, 2n],
+      [{ baseFeeMultiplier: 3 }, 3n],
+    ]) {
+      await chain.rpc('evm_revert', [snapshot]);
+      snapshot = await chain.rpc('evm_snapshot');
+      const input = await planFor();
+      const ws = await workspace();
+      const { baseFeePerGas } = await chain.client.getBlock();
+      assert.ok(baseFeePerGas > 0n);
+      assert.equal((await apply(input, ws, options)).status, 'applied');
+      const intent = (await journalOf(ws.journalFile)).find((record) => record.phase === 'intent');
+      assert.equal(
+        BigInt(intent.maxFeePerGas),
+        baseFeePerGas * multiple + BigInt(intent.maxPriorityFeePerGas),
+      );
+    }
+  });
+
   test('a reviewed ceiling rejects a fee spike and counts earlier transactions by the same signer', async () => {
     const input = await planFor();
     const alpha = input.plan.resources.find((resource) => resource.id === 'contract:alpha');
@@ -1063,7 +1105,7 @@ describe('apply on a private automining chain', () => {
   test('the reviewed ceiling still counts a verified signature after restart', async () => {
     const preliminary = await planFor();
     const alpha = preliminary.plan.resources.find((resource) => resource.id === 'contract:alpha');
-    const fees = await chain.client.estimateFeesPerGas();
+    const fees = await feesFor(chain.client);
     const gas = await estimateGasLimit(chain.client, {
       from: deployerA.address,
       tx: alpha.tx,

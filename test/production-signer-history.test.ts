@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { InternalRpcError } from 'viem';
 import { assertSignerHistory } from '../src/execution/settlement.ts';
 import { hashJson } from '../src/identity.ts';
 import { deployerA } from './execution/chain.ts';
@@ -169,4 +170,21 @@ test('a current-plan signature without a canonical receipt blocks a fresh nonce'
   const row = { ...indexEntry(original), label: 'next', planHash: currentPlan };
   await rejectsCode(history([row], []).ctx, 'foreign-outstanding');
   await assertSignerHistory(history([row], []).ctx, [deployerA.address], new Set([original]));
+});
+
+test('shared signer history remains usable after a transient receipt outage', async () => {
+  const { ctx } = history([indexEntry(original)], [original]);
+  ctx.config.pollIntervalMs = 1;
+  ctx.config.receiptTimeoutMs = 1_000;
+  const lookup = ctx.client.getTransactionReceipt;
+  let failed = false;
+  ctx.client.getTransactionReceipt = async (request) => {
+    if (!failed) {
+      failed = true;
+      throw new InternalRpcError(new Error('temporarily unavailable'));
+    }
+    return lookup(request);
+  };
+  await assertSignerHistory(ctx, [deployerA.address]);
+  assert.equal(failed, true);
 });

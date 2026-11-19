@@ -3,6 +3,10 @@ import { keccak256 } from 'viem';
 import {
   findKnownReceipt,
   nonceConsumed,
+  receiptAfterNonceUse,
+  receiptRetryOptions,
+  retryRead,
+  signerNonces,
   broadcast,
   validateSignedTransaction,
   waitForReceipt,
@@ -126,8 +130,10 @@ export function pipelineAttempt(
   ) {
     throw new ApplyError('journal', `Wave ${wave.wave} has an ambiguous abandoned attempt.`);
   }
+  // An attempt has no intent for an action that was already satisfied when it reserved its
+  // nonces. A journal without an attempt ID is older than that rule and has one intent per action.
   if (
-    intents.length !== wave.batches.flat().length ||
+    (!attemptId && intents.length !== wave.batches.flat().length) ||
     signatures.some(
       (record) =>
         !intents.some(
@@ -160,9 +166,18 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
   }
   const groups = new Map<string, ResumeJob[]>();
   const jobs: ResumeJob[] = [];
-  for (const entry of entries) {
-    const intent = byAction.get(entry.id);
-    const item = ctx.prepared.get(entry.id);
+  const skipped: PreparedAction[] = [];
+  for (const saved of entries) {
+    const intent = byAction.get(saved.id);
+    const item = ctx.prepared.get(saved.id);
+    if (!intent && item) {
+      // The attempt reserved no nonce for this action, because it was already satisfied.
+      skipped.push(item);
+      continue;
+    }
+    // The reserved offset of an action is its position among the actions of its signer that
+    // have an intent. It is the saved offset when the attempt left no action out.
+    const entry = { ...saved, nonceOffset: groups.get(saved.signer)?.length ?? 0 };
     const signer = ctx.lanes.byAddress.get(entry.signer);
     const tx = item ? transactionFor(item) : null;
     if (
@@ -170,7 +185,7 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
       !item ||
       !signer ||
       intent.signer?.toLowerCase() !== entry.signer ||
-      typeof entry.nonceOffset !== 'number' ||
+      typeof saved.nonceOffset !== 'number' ||
       intent.nonceOffset !== entry.nonceOffset ||
       intent.to?.toLowerCase() !== tx?.to.toLowerCase() ||
       intent.value !== tx?.value ||
@@ -272,23 +287,24 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
     groups.set(entry.signer, group);
     jobs.push(job);
   }
-  if (byAction.size !== entries.length)
+  if (byAction.size !== jobs.length)
     throw new ApplyError('journal', `Wave ${wave.wave} has intents outside its saved schedule.`);
-  for (const group of groups.values()) {
-    if (group[0]?.entry.nonceOffset !== 0)
-      throw new ApplyError('journal', `Wave ${wave.wave} has an invalid first nonce offset.`);
-  }
   if (
     new Set([...groups.values()].map((group) => group[0]!.intent.reservationId)).size !==
     groups.size
   ) {
     throw new ApplyError('journal', `Wave ${wave.wave} shares a reservation across signer groups.`);
   }
+  const retry = receiptRetryOptions(ctx.config);
+  for (const job of jobs)
+    job.receipt = job.signed ? await findKnownReceipt(ctx.client, job.variants, retry) : null;
   const conflict = jobs.find((job) => {
     const last = job.records.at(-1);
     return (
       last?.phase === 'failed' &&
       !last.retryable &&
+      // A lagging RPC node can cause a false conflict for a journaled transaction that is mined.
+      !(last.code === 'nonce-conflict' && job.receipt) &&
       !(
         last.code === 'postcondition' &&
         job.item.planned.action === 'deploy' &&
@@ -306,8 +322,6 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
     throw new ApplyError(failure.code, failure.reason, { actionId: conflict.item.planned.id });
 
   // Check every signer and precondition before adding any signature or broadcast.
-  for (const job of jobs)
-    job.receipt = job.signed ? await findKnownReceipt(ctx.client, job.variants) : null;
   for (const job of jobs) {
     const last = job.records.at(-1);
     if (
@@ -334,10 +348,21 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
         receipt.transactionHash,
         receipt.receipt,
         job.item.planned.id,
+        false,
+        retry,
       );
   }
   for (const job of jobs.filter((entry) => entry.records.at(-1)?.phase === 'verified'))
     await decide(ctx, job.item);
+  // An action without an intent must still be satisfied: this attempt has no nonce for it.
+  for (const item of skipped) {
+    if (await decide(ctx, item))
+      throw new ApplyError(
+        'conflict',
+        `Wave ${wave.wave} reserved no nonce for ${item.planned.id}, because it was already satisfied, but it is not satisfied now.`,
+        { actionId: item.planned.id },
+      );
+  }
   const outstanding = jobs.filter(
     (job) => job.records.at(-1)?.phase !== 'verified' && !job.receipt,
   );
@@ -352,10 +377,7 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
       );
   }
   for (const [address, group] of groups) {
-    const [latest, pending] = await Promise.all([
-      ctx.client.getTransactionCount({ address: address as Address, blockTag: 'latest' }),
-      ctx.client.getTransactionCount({ address: address as Address, blockTag: 'pending' }),
-    ]);
+    const [latest, pending] = await signerNonces(ctx.client, address as Address, retry);
     const first = group[0]!;
     const base = BigInt(first.intent.nonce);
     if (BigInt(latest) < base || BigInt(pending) < BigInt(latest))
@@ -562,7 +584,7 @@ function intentFields(
   };
 }
 
-/** Pipeline signing reserves each signer group's saved nonce offsets; every intent precedes every signature. */
+/** Pipeline signing reserves consecutive nonces for each signer group in its saved order; every intent precedes every signature. */
 export interface PipelineSigningInput {
   wave: number;
   work: PipelineFundedJob[];
@@ -590,11 +612,9 @@ export async function signPipelineBatch(
     group.push(job);
     groups.set(signer, group);
   }
+  const retry = receiptRetryOptions(ctx.config);
   for (const [signer, jobs] of groups) {
-    const [latest, pending] = await Promise.all([
-      ctx.client.getTransactionCount({ address: signer as Address, blockTag: 'latest' }),
-      ctx.client.getTransactionCount({ address: signer as Address, blockTag: 'pending' }),
-    ]);
+    const [latest, pending] = await signerNonces(ctx.client, signer as Address, retry);
     if (pending !== latest)
       return fail(
         ctx,
@@ -603,13 +623,10 @@ export async function signPipelineBatch(
         `Signer ${signer} has unknown pending transactions.`,
         { signer: signer as Address, nonce: String(latest) },
       );
+    // The saved offsets give the order. An already satisfied action sends no transaction, so
+    // the actions after it move up, and each intent records the offset that it reserves.
     for (const [offset, job] of jobs.entries()) {
-      if (job.entry.nonceOffset !== offset)
-        throw new ApplyError(
-          'stale-pipeline',
-          `Wave ${wave} has an already satisfied action before ${job.item.planned.id}; create a new pipeline plan.`,
-          { actionId: job.item.planned.id },
-        );
+      job.entry = { ...job.entry, nonceOffset: offset };
       job.envelope.nonce = latest + offset;
     }
   }
@@ -696,19 +713,21 @@ async function pipelineConflict(
 async function preparePipelineBroadcast(
   ctx: ApplyContext,
   job: ActivePipelineJob,
+  deadline?: number,
 ): Promise<PipelineAttempt> {
   const { signed } = job;
-  let receipt = await findKnownReceipt(ctx.client, job.variants);
+  const retry = receiptRetryOptions(ctx.config, deadline);
+  let receipt = await findKnownReceipt(ctx.client, job.variants, retry);
   if (receipt) return { receipt };
-  if (await nonceConsumed(ctx.client, signed.signer, signed.nonce)) {
-    receipt = await findKnownReceipt(ctx.client, job.variants);
+  if (await nonceConsumed(ctx.client, signed.signer, signed.nonce, retry)) {
+    receipt = await receiptAfterNonceUse(ctx.client, job.variants, ctx.config);
     if (receipt) return { receipt };
     await pipelineConflict(ctx, job);
   }
-  const pending = await ctx.client.getTransactionCount({
-    address: signed.signer,
-    blockTag: 'pending',
-  });
+  const pending = await retryRead(
+    () => ctx.client.getTransactionCount({ address: signed.signer, blockTag: 'pending' }),
+    retry,
+  );
   if (BigInt(pending) > BigInt(signed.nonce)) {
     const knownBroadcast = ctx.journal
       .forAction(ctx.plan.planHash, job.item.planned.id)
@@ -776,7 +795,7 @@ async function recordPipelineBroadcast(
         transactionHash: signed.transactionHash,
       });
   } else if (sent.nonceTooLow) {
-    const receipt = await findKnownReceipt(ctx.client, job.variants);
+    const receipt = await receiptAfterNonceUse(ctx.client, job.variants, ctx.config);
     if (receipt) return { receipt };
     await pipelineConflict(ctx, job);
   }
@@ -806,8 +825,9 @@ async function attemptPipelineBroadcast(
   ctx: ApplyContext,
   job: ActivePipelineJob,
   rebroadcast: boolean,
+  deadline: number,
 ): Promise<PipelineAttempt> {
-  const prepared = await preparePipelineBroadcast(ctx, job);
+  const prepared = await preparePipelineBroadcast(ctx, job, deadline);
   if (prepared.receipt) return prepared;
   await ctx.lock.assertHeld?.();
   return sendPipelineTransaction(ctx, job, rebroadcast);
@@ -838,7 +858,10 @@ export async function settlePipelineBatch(
   const submitStart = Date.now();
   // Reconcile the complete group first. Then initiate all raw requests in plan
   // order without waiting for a lower nonce's RPC response.
-  const prepared = await Promise.all(work.map((job) => preparePipelineBroadcast(ctx, job)));
+  const preparationDeadline = Date.now() + ctx.config.receiptTimeoutMs;
+  const prepared = await Promise.all(
+    work.map((job) => preparePipelineBroadcast(ctx, job, preparationDeadline)),
+  );
   // One lease check covers the group, so no await separates its first requests.
   await ctx.lock.assertHeld?.();
   const firstAttempts = await Promise.all(
@@ -872,7 +895,7 @@ export async function settlePipelineBatch(
                   { actionId: job.item.planned.id, retryable: true },
                 );
               await pause(ctx.config.pollIntervalMs);
-              attempt = await attemptPipelineBroadcast(ctx, job, true);
+              attempt = await attemptPipelineBroadcast(ctx, job, true, deadline);
             }
           } finally {
             ctx.timings.submitMs += Date.now() - retryStart;
@@ -888,6 +911,8 @@ export async function settlePipelineBatch(
           nonce: job.signed.nonce,
           pollIntervalMs: ctx.config.pollIntervalMs,
           timeoutMs: Math.min(1_000, Math.max(0, deadline - Date.now())),
+          receiptTimeoutMs: ctx.config.receiptTimeoutMs,
+          retryDeadline: deadline,
         });
         if ('dead' in waited) await pipelineConflict(ctx, job);
         if ('receipt' in waited) {
@@ -906,7 +931,7 @@ export async function settlePipelineBatch(
         if (!known || Date.now() >= knownRetryAt) {
           const retryStart = Date.now();
           try {
-            attempt = await attemptPipelineBroadcast(ctx, job, true);
+            attempt = await attemptPipelineBroadcast(ctx, job, true, deadline);
           } finally {
             ctx.timings.submitMs += Date.now() - retryStart;
           }

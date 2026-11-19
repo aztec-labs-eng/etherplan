@@ -7,6 +7,7 @@ import { openJournal } from './journal.ts';
 import { ApplyError } from './errors.ts';
 import { safeExternalError } from './rpc-error.ts';
 import { roleOf } from './shared.ts';
+import { DEFAULT_BASE_FEE_MULTIPLIER } from './transactions.ts';
 import type { Plan } from '../planning/types.ts';
 import type { Artifacts } from '../artifacts/types.ts';
 import type { Schedule } from '../scheduling/types.ts';
@@ -65,11 +66,14 @@ export interface ApplyContext {
   schedule: Schedule | null;
 }
 
+export const DEFAULT_VERIFICATION_TIMEOUT_MS = 300_000;
+
 const DEFAULTS = {
   pollIntervalMs: 250,
   receiptTimeoutMs: 120_000,
-  verificationTimeoutMs: 300_000,
+  verificationTimeoutMs: DEFAULT_VERIFICATION_TIMEOUT_MS,
   gasMultiplier: 1.2,
+  baseFeeMultiplier: DEFAULT_BASE_FEE_MULTIPLIER,
   fees: null,
   budgets: {},
   hooks: {},
@@ -185,6 +189,12 @@ export async function openApplyContext({
     (!Number.isFinite(options.gasMultiplier) || options.gasMultiplier < 1)
   ) {
     throw new ApplyError('config', 'gasMultiplier must be a number no less than 1.');
+  }
+  if (
+    options.baseFeeMultiplier !== undefined &&
+    (!Number.isFinite(options.baseFeeMultiplier) || options.baseFeeMultiplier < 1)
+  ) {
+    throw new ApplyError('config', 'baseFeeMultiplier must be a number no less than 1.');
   }
   if (options.fees) {
     const wei = (value: unknown) =>

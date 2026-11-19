@@ -1,7 +1,14 @@
 import { hashJson } from '../identity.ts';
 import { checkFactory, checkVerificationChain, jsonSafe } from './preflight.ts';
 import { LIVE_PHASES, intentForSigned, latestRecord } from './journal.ts';
-import { findReceipt, validateSignedTransaction } from './transactions.ts';
+import {
+  findBlock,
+  findReceipt,
+  receiptRetryOptions,
+  retryRead,
+  validateSignedTransaction,
+} from './transactions.ts';
+import type { ReceiptRetryOptions } from './transactions.ts';
 import { ApplyError } from './errors.ts';
 import { isRpcError } from './rpc-error.ts';
 import { pause } from './shared.ts';
@@ -10,7 +17,8 @@ import { STATEFUL_CONSTRUCTOR_LIMITATION_URL } from '../verification/limitations
 import { assertPinnedAbsent, pinnedJournalCommitment } from '../verification/pinned-runtime.ts';
 import { append, fail, report, summarizeVerification } from './report.ts';
 import type { Client, Hash, ResourceId } from '../types.ts';
-import type { VerificationResult } from '../verification/types.ts';
+import { verificationInconclusive } from '../verification/index.ts';
+import type { VerificationResult, VerifyOptions } from '../verification/types.ts';
 import type {
   ApplyContext,
   JournalRecord,
@@ -24,11 +32,13 @@ import type {
 const lower = (value: string | null | undefined): string | null =>
   typeof value === 'string' ? value.toLowerCase() : (value ?? null);
 
+/** A failed result that a retry or another RPC could still change. */
 function providerVerificationFailure(verification: VerificationResult): boolean {
   return (
-    verification.status === 'unverified' &&
-    verification.reasons.length === 0 &&
-    verification.evidence?.creation?.replayFailure === 'provider'
+    verification.status !== 'verified' &&
+    (verificationInconclusive(verification) ||
+      (verification.reasons.length === 0 &&
+        verification.evidence?.creation?.replayFailure === 'provider'))
   );
 }
 
@@ -78,21 +88,22 @@ export async function verify(
   });
 }
 
+// The alternate RPC may answer only after it agrees on the chain and the anchor block.
 async function verifyWithFallback(
   ctx: ApplyContext,
   item: PreparedAction,
-  options: import('../verification/types.ts').VerifyOptions,
+  options: VerifyOptions,
   anchor: { blockNumber: bigint; blockHash: Hash },
 ): Promise<VerificationResult | null> {
   let primary: VerificationResult | null = null;
   try {
     primary = await verify(ctx, item, options);
   } catch (error) {
-    if (item.planned.action !== 'deploy' || !isRpcError(error)) throw error;
+    if (!isRpcError(error)) throw error;
   }
   if (primary && !providerVerificationFailure(primary) && !creationReplayFailed(primary))
     return primary;
-  if (item.planned.action === 'deploy' && ctx.verificationClient) {
+  if (ctx.verificationClient) {
     try {
       await checkVerificationChain(ctx.verificationClient, ctx.plan.chain, anchor);
       const alternate = await verify(ctx, item, options, ctx.verificationClient);
@@ -112,6 +123,53 @@ async function verifyWithFallback(
     }
   }
   return primary;
+}
+
+/**
+ * Verifies until a result is conclusive or the caller's deadline passes, rechecking the caller's
+ * anchor between attempts. Returns null when no provider produced a result.
+ */
+async function verifyUntil(
+  ctx: ApplyContext,
+  item: PreparedAction,
+  options: VerifyOptions,
+  anchor: { blockNumber: bigint; blockHash: Hash },
+  deadline: number,
+  recheck: () => Promise<unknown>,
+): Promise<VerificationResult | null> {
+  let delay = 500;
+  for (;;) {
+    const attempt = await verifyWithFallback(ctx, item, options, anchor);
+    if ((attempt && !providerVerificationFailure(attempt)) || Date.now() >= deadline)
+      return attempt;
+    await recheck();
+    await pause(Math.min(delay, Math.max(0, deadline - Date.now())));
+    delay = Math.min(delay * 2, 10_000);
+  }
+}
+
+/** Verifies current state at one canonical block. An outage stops resumably, never as drift. */
+async function verifyCurrent(
+  ctx: ApplyContext,
+  item: PreparedAction,
+  options: VerifyOptions = {},
+): Promise<VerificationResult> {
+  const retry = receiptRetryOptions(ctx.config);
+  const block = await retryRead(() => ctx.client.getBlock({ blockTag: 'latest' }), retry);
+  const snapshot = { number: block.number, hash: block.hash };
+  const verification = await verifyUntil(
+    ctx,
+    item,
+    { ...options, blockNumber: block.number },
+    { blockNumber: block.number, blockHash: block.hash },
+    Date.now() + ctx.config.verificationTimeoutMs,
+    () => assertCanonicalSnapshot(ctx, snapshot, retry),
+  );
+  if (verification && !providerVerificationFailure(verification)) return verification;
+  throw new ApplyError('dependency', `Verification RPC failed for ${item.planned.id}.`, {
+    actionId: item.planned.id,
+    retryable: true,
+  });
 }
 
 export async function markVerified(
@@ -175,7 +233,7 @@ export async function precondition(
       { evidence: { status: 'conflict', address: planned.address } },
     );
   }
-  const verification = await verify(ctx, item);
+  const verification = await verifyCurrent(ctx, item);
   const observed = (verification.bindingChecks ?? []).map((check) => check.observed);
   if (
     verification.status === 'verified' &&
@@ -200,17 +258,19 @@ export async function stableReceipt(
   receipt: Receipt | ReceiptJson,
   actionId: ResourceId,
   wait = false,
+  retry: ReceiptRetryOptions = receiptRetryOptions(ctx.config),
 ): Promise<Receipt> {
-  const deadline = Date.now() + ctx.config.receiptTimeoutMs;
+  const deadline = retry.deadline;
+  const anchor = { number: BigInt(receipt.blockNumber), hash: receipt.blockHash.toLowerCase() };
   for (;;) {
-    const current = await findReceipt(ctx.client, transactionHash);
-    const block =
-      current && (await ctx.client.getBlock({ blockNumber: BigInt(receipt.blockNumber) }));
+    const current = await findReceipt(ctx.client, transactionHash, retry);
+    const block = await findBlock(ctx.client, anchor.number, retry);
+    // Only a receipt or block that disagrees with the anchor proves a reorg; a lagging node
+    // can lack either one while the recorded block is still canonical.
     if (
-      !current ||
-      current.blockHash.toLowerCase() !== receipt.blockHash.toLowerCase() ||
-      current.blockNumber !== BigInt(receipt.blockNumber) ||
-      block?.hash.toLowerCase() !== receipt.blockHash.toLowerCase()
+      (block && block.hash.toLowerCase() !== anchor.hash) ||
+      (current &&
+        (current.blockHash.toLowerCase() !== anchor.hash || current.blockNumber !== anchor.number))
     ) {
       throw new ApplyError(
         'reorg',
@@ -218,23 +278,33 @@ export async function stableReceipt(
         { actionId, retryable: true },
       );
     }
-    if (
-      ctx.config.confirmations === 1 ||
-      (await ctx.client.getBlock({ blockTag: 'latest' })).number - current.blockNumber + 1n >=
-        BigInt(ctx.config.confirmations)
-    )
-      return current;
-    if (!wait || Date.now() >= deadline)
+    if (current && block) {
+      const depth =
+        ctx.config.confirmations === 1
+          ? 1n
+          : (await retryRead(() => ctx.client.getBlock({ blockTag: 'latest' }), retry)).number -
+            current.blockNumber +
+            1n;
+      if (depth >= BigInt(ctx.config.confirmations)) return current;
+      if (!wait || Date.now() >= deadline)
+        throw new ApplyError(
+          'finality',
+          `Transaction ${transactionHash} has fewer than ${ctx.config.confirmations} confirmations.`,
+          { actionId, retryable: true },
+        );
+    } else if (Date.now() >= deadline) {
       throw new ApplyError(
-        'finality',
-        `Transaction ${transactionHash} has fewer than ${ctx.config.confirmations} confirmations.`,
+        'receipt-timeout',
+        `Receipt for ${transactionHash} is unavailable at its recorded block ${anchor.number}. Rerun to resume the same transaction.`,
         { actionId, retryable: true },
       );
+    }
     await pause(ctx.config.pollIntervalMs);
   }
 }
 
 export async function revalidateVerified(ctx: ApplyContext): Promise<void> {
+  const retry = receiptRetryOptions(ctx.config);
   for (const item of ctx.prepared.values()) {
     const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
     const latest = records.at(-1);
@@ -251,7 +321,7 @@ export async function revalidateVerified(ctx: ApplyContext): Promise<void> {
       throw new ApplyError('journal', `Verified action ${item.planned.id} has no receipt.`, {
         actionId: item.planned.id,
       });
-    await stableReceipt(ctx, hash, receipt, item.planned.id);
+    await stableReceipt(ctx, hash, receipt, item.planned.id, false, retry);
   }
 }
 
@@ -259,7 +329,10 @@ export async function revalidateVerified(ctx: ApplyContext): Promise<void> {
 export async function revalidateDesiredState(
   ctx: ApplyContext,
 ): Promise<{ number: bigint; hash: Hash }> {
-  const block = await ctx.client.getBlock({ blockTag: 'latest' });
+  const block = await retryRead(
+    () => ctx.client.getBlock({ blockTag: 'latest' }),
+    receiptRetryOptions(ctx.config),
+  );
   const fresh = new Map<ResourceId, VerificationResult>();
   for (const resource of ctx.plan.resources) {
     const item = ctx.prepared.get(resource.id);
@@ -272,27 +345,20 @@ export async function revalidateDesiredState(
       );
     }
     const verificationStart = Date.now();
-    let verification: VerificationResult | null = null;
-    const deadline =
-      verificationStart + (item.planned.action === 'deploy' ? ctx.config.verificationTimeoutMs : 0);
-    let delay = 500;
-    for (;;) {
-      verification = await verifyWithFallback(
-        ctx,
-        item,
-        { blockNumber: block.number },
-        { blockNumber: block.number, blockHash: block.hash },
-      );
-      if (verification && !providerVerificationFailure(verification)) break;
-      if (Date.now() >= deadline) {
-        throw new ApplyError('postcondition', `Final verification RPC failed for ${resource.id}.`, {
-          actionId: resource.id,
-          retryable: true,
-        });
-      }
-      await assertCanonicalSnapshot(ctx, { number: block.number, hash: block.hash });
-      await pause(Math.min(delay, Math.max(0, deadline - Date.now())));
-      delay = Math.min(delay * 2, 10_000);
+    const retry = receiptRetryOptions(ctx.config);
+    const verification = await verifyUntil(
+      ctx,
+      item,
+      { blockNumber: block.number },
+      { blockNumber: block.number, blockHash: block.hash },
+      verificationStart + ctx.config.verificationTimeoutMs,
+      () => assertCanonicalSnapshot(ctx, block, retry),
+    );
+    if (!verification || providerVerificationFailure(verification)) {
+      throw new ApplyError('postcondition', `Final verification RPC failed for ${resource.id}.`, {
+        actionId: resource.id,
+        retryable: true,
+      });
     }
     ctx.timings.verificationMs += Date.now() - verificationStart;
     if (verification.status !== 'verified') {
@@ -322,17 +388,14 @@ export async function revalidateDesiredState(
 export async function assertCanonicalSnapshot(
   ctx: ApplyContext,
   snapshot: { number: bigint; hash: Hash },
+  retry: ReceiptRetryOptions = receiptRetryOptions(ctx.config),
 ): Promise<void> {
-  const block = await ctx.client.getBlock({ blockNumber: snapshot.number });
+  const block = await retryRead(() => ctx.client.getBlock({ blockNumber: snapshot.number }), retry);
   if (block.hash.toLowerCase() !== snapshot.hash.toLowerCase()) {
-    throw new ApplyError(
-      'reorg',
-      `Final verification block ${snapshot.number} is no longer canonical.`,
-      {
-        retryable: true,
-        evidence: { expected: snapshot.hash, actual: block.hash },
-      },
-    );
+    throw new ApplyError('reorg', `Verification block ${snapshot.number} is no longer canonical.`, {
+      retryable: true,
+      evidence: { expected: snapshot.hash, actual: block.hash },
+    });
   }
 }
 
@@ -345,30 +408,48 @@ export async function finish(
 ): Promise<void> {
   const transactionHash = signed.transactionHash;
   await stableReceipt(ctx, transactionHash, receipt, item.planned.id, true);
+  if (receipt.status !== 'success' && item.planned.action === 'deploy') {
+    return fail(
+      ctx,
+      item,
+      'reverted',
+      `Deployment transaction ${transactionHash} reverted; matching code at the target cannot establish this plan's creator.`,
+      { transactionHash },
+    );
+  }
+  const verificationStart = Date.now();
+  const options = {
+    blockNumber: receipt.blockNumber,
+    transactionHash,
+    account: signed.signer,
+    ...(item.planned.action === 'deploy' ? { expectedCreator: signed.signer } : {}),
+  };
+  const retry = receiptRetryOptions(ctx.config);
+  const verification = await verifyUntil(
+    ctx,
+    item,
+    options,
+    receipt,
+    verificationStart + ctx.config.verificationTimeoutMs,
+    () => stableReceipt(ctx, transactionHash, receipt, item.planned.id, false, retry),
+  );
+  ctx.timings.verificationMs += Date.now() - verificationStart;
   if (receipt.status !== 'success') {
-    if (item.planned.action === 'deploy') {
-      return fail(
-        ctx,
-        item,
-        'reverted',
-        `Deployment transaction ${transactionHash} reverted; matching code at the target cannot establish this plan's creator.`,
-        { transactionHash },
-      );
-    }
-    const verificationStart = Date.now();
-    const verification = await verify(ctx, item, {
-      blockNumber: receipt.blockNumber,
-      transactionHash,
-      account: signed.signer,
-    });
-    ctx.timings.verificationMs += Date.now() - verificationStart;
     await stableReceipt(ctx, transactionHash, receipt, item.planned.id);
-    if (verification.status === 'verified')
+    if (verification?.status === 'verified')
       return markVerified(ctx, item, verification, {
         outcome: 'already-satisfied',
         revertedTransaction: transactionHash,
       });
-    await fail(
+    // The revert is certain; whether its desired state already holds is not. Journal nothing,
+    // so a rerun checks this transaction again instead of signing another.
+    if (!verification || providerVerificationFailure(verification))
+      throw new ApplyError(
+        'postcondition',
+        `Transaction ${transactionHash} reverted, and verification RPC failed. Rerun to check its desired state again.`,
+        { actionId: item.planned.id, retryable: true },
+      );
+    return fail(
       ctx,
       item,
       'reverted',
@@ -376,46 +457,21 @@ export async function finish(
       { transactionHash, evidence: summarizeVerification(verification) },
     );
   }
-  const verificationStart = Date.now();
-  const deadline =
-    verificationStart + (item.planned.action === 'deploy' ? ctx.config.verificationTimeoutMs : 0);
-  let delay = 500;
-  let verification: VerificationResult;
-  const options = {
-    blockNumber: receipt.blockNumber,
-    transactionHash,
-    account: signed.signer,
-    ...(item.planned.action === 'deploy' ? { expectedCreator: signed.signer } : {}),
-  };
-  for (;;) {
-    const attempt = await verifyWithFallback(ctx, item, options, receipt);
-    if (attempt && !providerVerificationFailure(attempt)) {
-      verification = attempt;
-      break;
-    }
-    if (Date.now() >= deadline) {
-      if (attempt) {
-        verification = attempt;
-        break;
-      }
-      return fail(
-        ctx,
-        item,
-        'postcondition',
-        `Transaction ${transactionHash} succeeded, but verification RPC failed.`,
-        { transactionHash, retryable: true },
-      );
-    }
-    await stableReceipt(ctx, transactionHash, receipt, item.planned.id);
-    await pause(Math.min(delay, Math.max(0, deadline - Date.now())));
-    delay = Math.min(delay * 2, 10_000);
-  }
-  ctx.timings.verificationMs += Date.now() - verificationStart;
+  if (!verification)
+    return fail(
+      ctx,
+      item,
+      'postcondition',
+      `Transaction ${transactionHash} succeeded, but verification RPC failed.`,
+      { transactionHash, retryable: true },
+    );
   await stableReceipt(ctx, transactionHash, receipt, item.planned.id);
   if (verification.status !== 'verified') {
-    const retryable = item.planned.action === 'deploy' && providerVerificationFailure(verification);
+    const retryable = providerVerificationFailure(verification);
     const replayHelp = retryable
-      ? ' Retry this saved plan with an RPC endpoint that supports historical state overrides.'
+      ? verification.evidence?.creation?.replayFailure === 'provider'
+        ? ' Retry this saved plan with an RPC endpoint that supports historical state overrides.'
+        : ' Rerun this saved plan once the RPC endpoint recovers.'
       : item.planned.action === 'deploy' &&
           verification.missingProofs.some((reason) =>
             reason.includes(STATEFUL_CONSTRUCTOR_LIMITATION_URL),
@@ -567,7 +623,7 @@ export function assertRecoveryEvidence(ctx: ApplyContext): void {
 export async function recheckReused(ctx: ApplyContext): Promise<void> {
   for (const item of ctx.prepared.values()) {
     if (item.planned.action !== 'reuse') continue;
-    const verification = await verify(ctx, item);
+    const verification = await verifyCurrent(ctx, item);
     if (verification.status !== 'verified') {
       throw new ApplyError(
         'drift',
@@ -630,7 +686,7 @@ export async function decide(
         actionId: item.planned.id,
       });
     }
-    const verification = await verify(ctx, item, {
+    const verification = await verifyCurrent(ctx, item, {
       ...(latest.transactionHash ? { transactionHash: latest.transactionHash } : {}),
       ...(latest.creationProof ? { creationProof: latest.creationProof } : {}),
       ...(expectedCreator ? { expectedCreator } : {}),
@@ -788,7 +844,7 @@ export async function checkExecutionDependencies(
           !outcome && evidence?.phase === 'verified' ? evidence.creationProof : undefined;
         checked.set(
           id,
-          await verify(ctx, dependency, {
+          await verifyCurrent(ctx, dependency, {
             ...(transactionHash ? { transactionHash } : {}),
             ...(creationProof ? { creationProof } : {}),
           }),

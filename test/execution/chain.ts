@@ -177,3 +177,52 @@ export function fixtureMany(n) {
     artifacts: new Map(contracts.map((contract) => [contract.id, holderArtifact])),
   };
 }
+
+// Three registries in the first wave. The second wave has one deployment for the deployer and
+// one owner call for each registry. A call in `satisfied` sets the value that a new registry
+// already has, so apply finds it already satisfied and sends no transaction for it.
+export function fixtureCalls({ satisfied = [] } = {}) {
+  const registries = [0, 1, 2].map((index) => ({
+    id: `registry${index}`,
+    artifact: 'Registry.json',
+    salt: salt(String(index + 1)),
+    args: [{ ref: 'values.owner' }],
+    senderIndependent: true,
+  }));
+  const holder = {
+    id: 'holder',
+    artifact: 'Holder.json',
+    salt: salt('9'),
+    args: [{ ref: 'contracts.registry0.address' }],
+    checks: { UPSTREAM: { ref: 'contracts.registry0.address' } },
+    senderIndependent: true,
+  };
+  const calls = [0, 1, 2].map((index) => {
+    const value = { ref: satisfied.includes(index) ? 'values.zero' : 'values.other' };
+    return {
+      id: `bind${index}`,
+      target: `registry${index}`,
+      method: 'setBinding',
+      args: [value],
+      check: { function: 'binding', equals: value },
+      before: { equals: { ref: 'values.zero' } },
+    };
+  });
+  return {
+    spec: {
+      schema: 1,
+      chainId: 31337,
+      values: {
+        other: '0x0000000000000000000000000000000000000002',
+        owner: owner.address,
+        zero: ZERO,
+      },
+      contracts: [...registries, holder],
+      calls,
+    },
+    artifacts: new Map([
+      ...registries.map((registry) => [registry.id, registryArtifact]),
+      ['holder', holderArtifact],
+    ]),
+  };
+}

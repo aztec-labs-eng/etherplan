@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { keccak256 } from 'viem';
-import { estimateGasLimit, feesFor, maximumCost } from './transactions.ts';
+import {
+  estimateGasLimit,
+  feesFor,
+  maximumCost,
+  receiptRetryOptions,
+  signerNonces,
+} from './transactions.ts';
 import { safeExternalError, safeRpcMessage } from './rpc-error.ts';
 import { ApplyError } from './errors.ts';
 import { transactionFor } from './shared.ts';
@@ -44,7 +50,7 @@ export async function prepareBatch(
   }
   if (candidates.length === 0) return [];
 
-  const fees = await feesFor(ctx.client, ctx.config.fees);
+  const fees = await feesFor(ctx.client, ctx.config.fees, ctx.config.baseFeeMultiplier);
   const work: FundedJob[] = [];
   for (const job of candidates) {
     const tx = transactionFor(job.item);
@@ -96,11 +102,9 @@ export async function signBatch(
     work.map((job) => job.signer.address),
   );
   // Read every signer's nonce and reject pending transactions before recording any intent.
+  const retry = receiptRetryOptions(ctx.config);
   for (const job of work) {
-    const [latest, pending] = await Promise.all([
-      ctx.client.getTransactionCount({ address: job.signer.address, blockTag: 'latest' }),
-      ctx.client.getTransactionCount({ address: job.signer.address, blockTag: 'pending' }),
-    ]);
+    const [latest, pending] = await signerNonces(ctx.client, job.signer.address, retry);
     if (pending !== latest) {
       await fail(
         ctx,
