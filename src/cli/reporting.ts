@@ -1,5 +1,6 @@
 import type { ApplyResult } from '../execution/types.ts';
 import type { Plan, PlannedResource } from '../planning/types.ts';
+import { moduleResourceLabel } from '../spec/modules.ts';
 
 function countText(count: number, singular: string, plural = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : plural}`;
@@ -85,7 +86,9 @@ export function formatVerifyReport(plan: Plan): string {
   for (const resource of plan.resources) {
     const status = verifyStatus(resource);
     counts[status]++;
-    lines.push(`  ${resource.id}: ${status}${resource.address ? ` at ${resource.address}` : ''}`);
+    lines.push(
+      `  ${moduleResourceLabel(plan.modules, resource.id)}: ${status}${resource.address ? ` at ${resource.address}` : ''}`,
+    );
     if (status !== 'verified') {
       const reasons = [
         ...new Set([...resource.observation.reasons, ...resource.observation.missingProofs]),
@@ -121,7 +124,9 @@ export function formatPlanReport(plan: Plan, project: string, workspace: string)
       resource.kind === 'call'
         ? `; ${resource.method}(${resource.args.map((arg) => JSON.stringify(arg)).join(', ')})${resource.action === 'reuse' ? ' already satisfied' : ''}`
         : '';
-    lines.push(`  ${resource.id}: ${resource.action.toUpperCase()} at ${resource.address}${call}`);
+    lines.push(
+      `  ${moduleResourceLabel(plan.modules, resource.id)}: ${resource.action.toUpperCase()} at ${resource.address}${call}`,
+    );
     if (resource.observation?.stateComparison?.replacement)
       lines.push(`    Replaces ${resource.observation.stateComparison.previousAddress}.`);
     if (resource.action === 'conflict' || resource.action === 'unverified') {

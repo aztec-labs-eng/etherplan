@@ -5,16 +5,40 @@ export interface ModuleBinding {
   after: ResourceId[];
 }
 
+export type ModulePath = (string | { key: string })[];
+export const MODULE_KEY = /^[a-z0-9]{1,12}$/;
+
+export function modulePath(path: ModulePath): string {
+  return path.reduce<string>(
+    (text, part) =>
+      typeof part === 'string'
+        ? `${text}${text ? '.' : ''}${part}`
+        : `${text}[${JSON.stringify(part.key)}]`,
+    '',
+  );
+}
+
 export interface ModuleInstance {
-  path: string[];
+  path: ModulePath;
   resources: Record<string, Record<string, ResourceId>>;
   inputs: Record<string, ModuleBinding>;
   outputs: Record<string, ModuleBinding>;
 }
 
 export interface ProjectModules {
-  version: 1;
+  version: 1 | 2;
   instances: ModuleInstance[];
+}
+
+/** Human labels are presentation only; state and saved-plan identities always use the original ID. */
+export function moduleResourceLabel(modules: ProjectModules | undefined, id: ResourceId): string {
+  for (const instance of modules?.instances ?? []) {
+    if (!instance.path.some((part) => typeof part !== 'string')) continue;
+    for (const [kind, names] of Object.entries(instance.resources))
+      for (const [name, resource] of Object.entries(names))
+        if (resource === id) return `${kind}:module.${modulePath(instance.path)}.${name}`;
+  }
+  return id;
 }
 
 export function validateModules(value: unknown): asserts value is ProjectModules {
@@ -24,8 +48,8 @@ export function validateModules(value: unknown): asserts value is ProjectModules
     if (!ok) throw new Error(`Spec modules: ${message}`);
   };
   assert(
-    object(value) && value.version === 1 && Array.isArray(value.instances),
-    'expected version 1 and instances[].',
+    object(value) && (value.version === 1 || value.version === 2) && Array.isArray(value.instances),
+    'expected version 1 or 2 and instances[].',
   );
   assert(
     Object.keys(value).every((key) => ['version', 'instances'].includes(key)),
@@ -41,7 +65,17 @@ export function validateModules(value: unknown): asserts value is ProjectModules
     assert(
       Array.isArray(item.path) &&
         item.path.length > 0 &&
-        item.path.every((part) => typeof part === 'string' && /^[a-z][a-zA-Z0-9_]*$/.test(part)),
+        item.path.every((part, index, parts) =>
+          typeof part === 'string'
+            ? /^[a-z][a-zA-Z0-9_]*$/.test(part)
+            : value.version === 2 &&
+              index > 0 &&
+              typeof parts[index - 1] === 'string' &&
+              object(part) &&
+              Object.keys(part).length === 1 &&
+              typeof part.key === 'string' &&
+              MODULE_KEY.test(part.key),
+        ),
       'invalid instance path.',
     );
     const key = JSON.stringify(item.path);

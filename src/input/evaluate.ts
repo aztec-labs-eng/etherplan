@@ -22,7 +22,8 @@ const RESOURCE_ROOTS: ReadonlySet<string> = new Set(['contracts', 'externals', '
 const HEX = /^0x[0-9a-fA-F]*$/;
 
 export interface NameScope {
-  moduleOutput?(module: string, output: string, node: Located): void;
+  moduleOutput?(module: string, output: string, node: HclReference): void;
+  each?: boolean;
   /** Throws if `var.<name>` has no declaration or value. `what` names the attribute. */
   variable(name: string, node: HclReference, what: string): void;
   locals: ReadonlyMap<string, HclAttribute>;
@@ -206,7 +207,14 @@ export function checkReferences(
     use(root, name);
     return;
   }
+  if (root === 'each') {
+    if (!scope.each) fail(node, 'each is valid only inside a repeated module call.');
+    if (name !== 'value' && (name !== 'key' || node.parts.length !== 2))
+      fail(node, 'Use each.key, each.value, or each.value.<field>.');
+    return;
+  }
   if (root === 'module' && node.parts.length === 3 && name && field && scope.moduleOutput) {
+    if (node.key) checkReferences(node.key, `${what} module key`, scope, use);
     scope.moduleOutput(name, field, node);
     return;
   }
@@ -230,6 +238,7 @@ export class Evaluator {
   /** The top-level mixer that derive hashes, once the compiler has evaluated it. */
   declare mixer: string | null;
   readiness = new Set<ResourceId>();
+  each: { key: string; value: JsonValue } | undefined;
 
   constructor(scope: EvaluationScope) {
     this.scope = scope;
@@ -247,11 +256,22 @@ export class Evaluator {
     }
   }
 
+  withEach<T>(each: typeof this.each, work: () => T): T {
+    const previous = this.each;
+    this.each = each;
+    try {
+      return work();
+    } finally {
+      this.each = previous;
+    }
+  }
+
   binding(node: HclExpression): ModuleBinding | undefined {
     if (node.kind !== 'reference' || !this.scope.module) return;
     const [root, name, output] = node.parts;
     let binding: ModuleBinding | undefined;
-    if (root === 'module' && name && output) binding = this.scope.module.output(name, output, this);
+    if (root === 'module' && name && output)
+      binding = this.scope.module.output(name, output, this, node);
     else if (root === 'var' && name) {
       binding = this.scope.module.bindings.get(name);
       if (binding && node.parts.length > 2) {
@@ -479,6 +499,12 @@ export class Evaluator {
   reference(node: HclReference, what: string, mode: Mode): JsonValue {
     const [root, name] = node.parts as [string, string];
     const text = node.parts.join('.');
+    if (root === 'each') {
+      if (!this.each) fail(node, 'each is valid only inside a repeated module call.');
+      return name === 'key'
+        ? this.each.key
+        : readFields(this.each.value, node.parts.slice(2), node);
+    }
     const binding = this.binding(node);
     if (binding) {
       if (mode !== 'value' && hasReference(binding.value))

@@ -1,4 +1,4 @@
-import { validateModules } from './modules.ts';
+import { modulePath, validateModules } from './modules.ts';
 import { callTarget } from './call-target.ts';
 import { isAddress, getContractAddress } from 'viem';
 import { assertDerivedSalt, assertSaltDerivation } from './salt.ts';
@@ -222,10 +222,10 @@ function validateReferences(spec: ParsedSpec): void {
       for (const id of Object.values(names))
         assert(
           resourceIds.has(id),
-          `Module ${instance.path.join('.')} maps missing resource ${id}.`,
+          `Module ${modulePath(instance.path)} maps missing resource ${id}.`,
         );
     for (const binding of [...Object.values(instance.inputs), ...Object.values(instance.outputs)]) {
-      candidates.push([`module:${instance.path.join('.')}`, [binding.value]]);
+      candidates.push([`module:${modulePath(instance.path)}`, [binding.value]]);
       for (const id of binding.after)
         assert(resourceIds.has(id), `Module readiness names missing resource ${id}.`);
     }
@@ -373,7 +373,8 @@ export function parseSpec(raw: unknown): ParsedSpec {
   assert(isObject(spec.externals), 'Spec externals must be an object.');
   assert(Array.isArray(spec.calls), 'Spec calls must be an array.');
   assert(
-    spec.contracts.length + spec.calls.length + Object.keys(spec.externals).length > 0,
+    spec.contracts.length + spec.calls.length + Object.keys(spec.externals).length > 0 ||
+      (isObject(spec.modules) && spec.modules.version === 2),
     'Spec needs at least one resource.',
   );
 
@@ -611,7 +612,10 @@ export function parseSpec(raw: unknown): ParsedSpec {
       );
   }
 
-  if (spec.contracts.some((item) => isObject(item) && item.salt !== undefined)) {
+  if (
+    spec.contracts.some((item) => isObject(item) && item.salt !== undefined) ||
+    (isObject(spec.modules) && spec.modules.version === 2 && spec.factory !== undefined)
+  ) {
     spec.factory ??= cloneJson(DEFAULT_FACTORY);
     assert(isObject(spec.factory), 'Factory must be an object.');
     assertKeys(spec.factory, new Set(['address', 'codeHash']), 'Factory');
