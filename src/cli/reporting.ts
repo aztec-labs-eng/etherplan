@@ -113,7 +113,7 @@ export function formatPlanReport(plan: Plan, project: string, workspace: string)
       `Signers: deployer ${signers.deployers.join(', ')}${signers.owner ? `; owner ${signers.owner}` : ''}`,
     );
   if (plan.maxSpendWei) lines.push(`Spend ceiling per signer: ${plan.maxSpendWei} wei`);
-  const counts = { deploy: 0, call: 0, reuse: 0, conflict: 0, unverified: 0 };
+  const counts = { deploy: 0, call: 0, verify: 0, reuse: 0, conflict: 0, unverified: 0 };
   lines.push('');
   for (const resource of plan.resources) {
     counts[resource.action]++;
@@ -137,6 +137,7 @@ export function formatPlanReport(plan: Plan, project: string, workspace: string)
   const totals = [
     [counts.deploy, 'deployment'],
     [counts.call, 'call'],
+    [counts.verify, 'verification'],
     [counts.reuse, 'reuse'],
     [counts.conflict, 'conflict'],
     [counts.unverified, 'unverified resource'],
@@ -148,7 +149,7 @@ export function formatPlanReport(plan: Plan, project: string, workspace: string)
   const blocked = counts.conflict + counts.unverified > 0;
   lines.push(
     '',
-    `${blocked ? 'Plan blocked' : 'Plan complete'}: ${!blocked && counts.deploy + counts.call === 0 ? `no changes; ${countText(counts.reuse, 'resource')} reused` : summary}${warnings.length ? `; ${countText(warnings.length, 'warning')}` : ''}.`,
+    `${blocked ? 'Plan blocked' : 'Plan complete'}: ${!blocked && counts.deploy + counts.call + counts.verify === 0 ? `no changes; ${countText(counts.reuse, 'resource')} reused` : summary}${warnings.length ? `; ${countText(warnings.length, 'warning')}` : ''}.`,
   );
   return `${lines.join('\n')}\n`;
 }

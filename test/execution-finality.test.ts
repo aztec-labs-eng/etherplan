@@ -41,36 +41,28 @@ async function records(file) {
   return (await readFile(file, 'utf8')).trim().split('\n').map(JSON.parse);
 }
 
-test('a dependent wave waits for the configured confirmation depth', async () => {
+test('dependent waves advance on receipts while state and success require finality', async () => {
   const chain = await startAnvil();
   try {
     const input = await setup(chain);
-    let receiptSeen;
-    const observed = new Promise((resolve) => {
-      receiptSeen = resolve;
-    });
-    const applying = applyPlan({
-      ...input,
-      confirmations: 2,
-      hooks: {
-        async afterRecord(record) {
-          if (record.phase === 'receipt' && record.actionId === 'contract:alpha') receiptSeen();
-          if (record.phase === 'receipt' && record.actionId === 'contract:gamma')
-            await chain.rpc('evm_mine');
-        },
-      },
-    });
-    await observed;
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await assert.rejects(
+      applyPlan({ ...input, confirmations: 2, receiptTimeoutMs: 500 }),
+      (error) => error.code === 'finality' && error.retryable === true,
+    );
     const before = await records(input.journalFile);
-    assert.equal(before.filter((record) => record.phase === 'verified').length, 0);
+    assert.equal(before.filter((record) => record.phase === 'verified').length, 2);
     assert.equal(
       before.filter((record) => record.phase === 'signed' && record.actionId === 'contract:gamma')
         .length,
-      0,
+      1,
     );
+    assert.equal(await readState(input.stateFile), null);
+
     await chain.rpc('evm_mine');
-    assert.equal((await applying).status, 'applied');
+    const result = await applyPlan({ ...input, confirmations: 2 });
+    assert.equal(result.status, 'applied');
+    assert.equal(result.transactionsSigned, 0);
+    assert.equal(Object.keys((await readState(input.stateFile)).resources).length, 2);
   } finally {
     await chain.stop();
   }

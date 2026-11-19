@@ -143,3 +143,22 @@ test('verify and plan reports preserve resource outcomes, warnings and failure r
   proposed.resources = [plan.resources[0]];
   assert.match(formatPlanReport(proposed, 'bridge', 'local'), /no changes; 1 resource reused/);
 });
+
+test('plan reports count verify actions without treating them as deployments or no changes', () => {
+  const plan = {
+    formatVersion: 2,
+    chain: { id: 31337 },
+    planHash: hash,
+    warnings: [],
+    resources: [
+      { id: 'contract:child', address, action: 'verify' },
+      { id: 'contract:existing', address, action: 'reuse' },
+    ],
+  } as Plan;
+  const report = formatPlanReport(plan, 'root', 'local');
+  assert.match(report, /contract:child: VERIFY at 0x/);
+  assert.match(report, /Plan complete: 1 verification, 1 reuse\.\n$/);
+  plan.resources.pop();
+  assert.match(formatPlanReport(plan, 'root', 'local'), /Plan complete: 1 verification\.\n$/);
+  assert.doesNotMatch(report, /deployment|no changes|NaN/);
+});
