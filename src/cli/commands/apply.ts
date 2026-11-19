@@ -115,7 +115,7 @@ export async function apply(context: ChainCommandContext): Promise<void> {
         timeoutMs: transactionOptions.verificationTimeoutMs ?? DEFAULT_VERIFICATION_TIMEOUT_MS,
       },
     } as Parameters<typeof createPlan>[0]);
-    await approvePlan(plan);
+    await approvePlan(plan, path.basename(path.dirname(context.specFile)), context.workspace);
     if (planningBackend?.planStore) {
       await planningBackend.planStore.put(planningBackend.scope, plan);
     } else {

@@ -18,7 +18,7 @@ A saved plan already pins the signer addresses and spend ceiling. Pass `--max-sp
 etherplan apply --max-spend-wei 100000000000000000
 ```
 
-Without `--plan`, apply gets signer addresses from the configured keys or signer module, creates a fresh plan, prints it, and waits for you to type `yes`. It saves the approved plan under `plans/<planHash>.json` beside the state file for recovery. This mode does not read or overwrite `plan.json`. A pipeline apply needs an explicit saved [pipeline plan](pipeline.md).
+Without `--plan`, apply gets signer addresses from the configured keys or signer module, creates a fresh plan, prints the same readable report as `plan`, and waits for you to type `yes`. It saves the approved plan under `plans/<planHash>.json` beside the state file for recovery. This mode does not read or overwrite `plan.json`. A pipeline apply needs an explicit saved [pipeline plan](pipeline.md).
 
 ## Check the result
 

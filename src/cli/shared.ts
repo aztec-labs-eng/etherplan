@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, open, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { formatPlanReport } from './reporting.ts';
 import type { Plan } from '../planning/types.ts';
 
 export function print(value: unknown): void {
@@ -12,8 +13,8 @@ export function defaultJournalFile(stateFile: string): string {
   return `${path.resolve(stateFile)}.journal.jsonl`;
 }
 
-export async function approvePlan(plan: Plan): Promise<void> {
-  process.stderr.write(`Proposed plan:\n${JSON.stringify(plan, null, 2)}\n\n`);
+export async function approvePlan(plan: Plan, project: string, workspace: string): Promise<void> {
+  process.stderr.write(`${formatPlanReport(plan, project, workspace)}\n`);
   const blocked = plan.resources.filter(
     (resource) => !['reuse', 'verify', 'deploy', 'call'].includes(resource.action),
   );

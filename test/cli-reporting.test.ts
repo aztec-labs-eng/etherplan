@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { formatApplyReport, formatVerifyReport } from '../src/cli/reporting.ts';
+import { formatApplyReport, formatPlanReport, formatVerifyReport } from '../src/cli/reporting.ts';
 import type { ApplyResult } from '../src/execution/types.ts';
 import type { Plan } from '../src/planning/types.ts';
 
@@ -92,7 +92,7 @@ test('a resumed apply does not claim an earlier deployment happened in this run'
   );
 });
 
-test('verify report lists resource outcomes and reasons before its final count', () => {
+test('verify and plan reports preserve resource outcomes, warnings and failure reasons', () => {
   const observation = (status: string, reasons: string[] = [], missingProofs: string[] = []) => ({
     status,
     reasons,
@@ -109,6 +109,9 @@ test('verify report lists resource outcomes and reasons before its final count',
       },
       {
         id: 'call:configure',
+        kind: 'call',
+        method: 'setValue',
+        args: ['42'],
         address,
         action: 'conflict',
         observation: observation('conflict', ['Value differs.']),
@@ -120,4 +123,23 @@ test('verify report lists resource outcomes and reasons before its final count',
   assert.match(text, /external:token: unverified at 0x[^\n]+\n    Getter could not be read\./);
   assert.match(text, /call:configure: conflict at 0x[^\n]+\n    Value differs\./);
   assert.match(text, /Verification incomplete: 1 verified, 1 unverified, 1 conflict\.\n$/);
+  const proposed = {
+    ...plan,
+    formatVersion: 2,
+    chain: { id: 31337 },
+    planHash: hash,
+    maxSpendWei: '100',
+    pipeline: { deployers: [address], owner: address },
+    warnings: ['Review assumptions.'],
+  } as Plan;
+  const report = formatPlanReport(proposed, 'bridge', 'local');
+  assert.match(report, /Plan for bridge \/ local \(chain 31337\)/);
+  assert.match(report, /Spend ceiling per signer: 100 wei/);
+  assert.match(report, /Signers: deployer/);
+  assert.match(report, /UNVERIFIED.*\n    Getter could not be read\./);
+  assert.match(report, /CONFLICT.*setValue\("42"\).*\n    Value differs\./);
+  assert.match(report, /Warning: Review assumptions\./);
+  assert.match(report, /Plan blocked: 1 reuse, 1 conflict, 1 unverified resource/);
+  proposed.resources = [plan.resources[0]];
+  assert.match(formatPlanReport(proposed, 'bridge', 'local'), /no changes; 1 resource reused/);
 });
