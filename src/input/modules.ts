@@ -2,12 +2,15 @@ import { readdir, readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { compileProject } from './compile.ts';
 import { fail, parseHcl } from './hcl.ts';
+import { hasReference } from './module-types.ts';
+import { MODULE_KEY, modulePath } from '../spec/modules.ts';
+import type { ModulePath } from '../spec/modules.ts';
 import type { CompiledProject } from './compile.ts';
 import type { Evaluator } from './evaluate.ts';
 import type { ModuleBinding, ModuleContext } from './module-types.ts';
 import type { HclBlock, HclDocument } from './types.ts';
 import type { VariableInputs } from './variables.ts';
-import type { JsonObject } from '../types.ts';
+import type { JsonObject, JsonValue } from '../types.ts';
 
 interface Source {
   directory: string;
@@ -54,10 +57,10 @@ export async function readSource(file: string): Promise<HclDocument> {
 }
 
 /** Length-prefixed instance segments prevent ambiguity between nesting, underscores and local names. */
-export function moduleResourceId(instance: string[], name: string): string {
+export function moduleResourceId(instance: ModulePath, name: string): string {
   return instance.length === 0
     ? name
-    : `module${instance.length}_${instance.map((part) => `${part.length}_${part}`).join('_')}_${name}`;
+    : `module${instance.length}_${instance.map((part) => (typeof part === 'string' ? `${part.length}_${part}` : `k${part.key.length}_${part.key}`)).join('_')}_${name}`;
 }
 
 function compare(left: string, right: string): number {
@@ -70,6 +73,7 @@ export async function compileModules(
   inputs: VariableInputs,
 ): Promise<CompiledProject> {
   const cache = new Map<string, Source>();
+  let repeated = false;
   const read = async (entry: string, stack: string[], root?: HclDocument): Promise<Source> => {
     const canonical = await realpath(entry);
     if (stack.includes(canonical))
@@ -99,6 +103,8 @@ export async function compileModules(
       if (factory) fail(factory, 'Only the root selects the CREATE2 factory.');
     }
     for (const block of source.document.blocks) {
+      if (!root && block.type === 'variable' && block.labels[0] === 'for_each')
+        fail(block, 'Child variable for_each is reserved for module repetition. Rename the input.');
       if (block.type === 'output') {
         const name = block.labels[0];
         if (!name || block.labels.length !== 1 || !/^[a-z][a-zA-Z0-9_]*$/.test(name))
@@ -107,6 +113,7 @@ export async function compileModules(
         source.outputs.add(name);
       }
       if (block.type !== 'module') continue;
+      if (block.body.attributes.has('for_each')) repeated = true;
       const name = block.labels[0];
       if (!name || block.labels.length !== 1 || !/^[a-z][a-zA-Z0-9_]*$/.test(name))
         fail(block, 'A module call needs one valid name label.');
@@ -132,48 +139,90 @@ export async function compileModules(
   };
   const root = await read(path.resolve(file), [], document);
   const instances: {
-    path: string[];
+    path: ModulePath;
     source: Source;
     compiled: CompiledProject;
     inputs: Map<string, ModuleBinding>;
   }[] = [];
   const compile = (
     source: Source,
-    instance: string[],
+    instance: ModulePath,
     bindings: Map<string, ModuleBinding>,
     inheritedChain?: number,
   ): CompiledProject => {
     const children = new Map<string, CompiledProject>();
     const active = new Set<string>();
+    const collections = new Map<string, Record<string, JsonValue>>();
     let chain = inheritedChain;
-    const child = (name: string, evaluator: Evaluator): CompiledProject => {
-      const previous = children.get(name);
+    const collection = (name: string, evaluator: Evaluator): Record<string, JsonValue> => {
+      const cached = collections.get(name);
+      if (cached) return cached;
+      const attribute = source.calls.get(name)!.block.body.attributes.get('for_each')!;
+      const identity = `collection:${name}`;
+      if (active.has(identity))
+        fail(attribute, `Module for_each cycle at ${modulePath([...instance, name])}.`);
+      active.add(identity);
+      const value = evaluator.withEach(undefined, () =>
+        evaluator.constant(attribute.value, `module ${name} for_each`),
+      );
+      if (
+        value !== null &&
+        (typeof value !== 'object' || Array.isArray(value) || hasReference(value))
+      )
+        fail(attribute, `module ${name} for_each must be a constant record or null.`);
+      const record = value ?? {};
+      for (const key of Object.keys(record))
+        if (!MODULE_KEY.test(key))
+          fail(
+            attribute,
+            `Module ${name} key ${JSON.stringify(key)} must contain 1 to 12 lowercase letters or digits (${MODULE_KEY}).`,
+          );
+      collections.set(name, record);
+      active.delete(identity);
+      return record;
+    };
+    const child = (
+      name: string,
+      key: string | undefined,
+      evaluator: Evaluator,
+    ): CompiledProject => {
+      const identity = JSON.stringify([name, key ?? null]);
+      const previous = children.get(identity);
       if (previous) return previous;
       const call = source.calls.get(name);
-      if (!call) throw new Error(`Unknown module ${[...instance, name].join('.')}.`);
-      if (active.has(name))
-        fail(call.block, `Module input/output cycle at ${[...instance, name].join('.')}.`);
-      active.add(name);
+      if (!call) throw new Error(`Unknown module ${modulePath([...instance, name])}.`);
+      const path: ModulePath = [...instance, name, ...(key === undefined ? [] : [{ key }])];
+      const record = key === undefined ? undefined : collection(name, evaluator);
+      if (key !== undefined && !Object.hasOwn(record!, key))
+        fail(
+          call.block,
+          `module.${modulePath([...instance, name])} has unknown key ${JSON.stringify(key)}. Available keys: ${Object.keys(record!).sort().join(', ') || '(none)'}.`,
+        );
+      if (active.has(identity))
+        fail(call.block, `Module input/output cycle at ${modulePath(path)}.`);
+      active.add(identity);
       const args = new Map<string, ModuleBinding>();
-      for (const [key, attribute] of call.block.body.attributes) {
-        if (key !== 'source')
+      for (const [inputName, attribute] of call.block.body.attributes) {
+        if (inputName !== 'source' && inputName !== 'for_each')
           args.set(
-            key,
-            evaluator.capture(() =>
-              evaluator.input(attribute.value, `module ${name} input ${key}`),
+            inputName,
+            evaluator.withEach(key === undefined ? undefined : { key, value: record![key]! }, () =>
+              evaluator.capture(() =>
+                evaluator.input(attribute.value, `module ${modulePath(path)} input ${inputName}`),
+              ),
             ),
           );
       }
       let result: CompiledProject;
       try {
-        result = compile(call.source, [...instance, name], args, chain);
+        result = compile(call.source, path, args, chain);
       } catch (error) {
-        throw new Error(`Module ${[...instance, name].join('.')}: ${(error as Error).message}`, {
+        throw new Error(`Module ${modulePath(path)}: ${(error as Error).message}`, {
           cause: error,
         });
       }
-      children.set(name, result);
-      active.delete(name);
+      children.set(identity, result);
+      active.delete(identity);
       return result;
     };
     const context: ModuleContext = {
@@ -183,13 +232,36 @@ export async function compileModules(
       inputs: [...source.calls.values()].flatMap(({ block }) =>
         [...block.body.attributes.values()]
           .filter((attribute) => attribute.name !== 'source')
-          .map((attribute) => attribute.value),
+          .map((attribute) => ({
+            value: attribute.value,
+            each: block.body.attributes.has('for_each') && attribute.name !== 'for_each',
+          })),
       ),
-      hasOutput: (name, output) => source.calls.get(name)?.source.outputs.has(output) ?? false,
-      output: (name, output, evaluator) => child(name, evaluator).outputs![output]!,
+      hasOutput(name, output, node) {
+        const call = source.calls.get(name);
+        if (call && call.block.body.attributes.has('for_each') !== (node.key !== undefined))
+          fail(
+            node,
+            call.block.body.attributes.has('for_each')
+              ? `Repeated module.${name} needs module.${name}[<key>].${output}.`
+              : `A single module call uses module.${name}.${output}; remove the index.`,
+          );
+        return call?.source.outputs.has(output) ?? false;
+      },
+      output(name, output, evaluator, node) {
+        const key = node.key ? evaluator.constant(node.key, `module.${name} key`) : undefined;
+        if (key !== undefined && typeof key !== 'string')
+          fail(node, `module.${name} key must be a constant string.`);
+        return child(name, key, evaluator).outputs![output]!;
+      },
       load(evaluator, chainId) {
         chain = chainId;
-        for (const name of [...source.calls.keys()].sort()) child(name, evaluator);
+        for (const name of [...source.calls.keys()].sort()) {
+          if (source.calls.get(name)!.block.body.attributes.has('for_each'))
+            for (const key of Object.keys(collection(name, evaluator)).sort())
+              child(name, key, evaluator);
+          else child(name, undefined, evaluator);
+        }
       },
     };
     const local =
@@ -244,7 +316,7 @@ export async function compileModules(
   const assumptions = all.flatMap((spec) => spec.executionAssumptions ?? []);
   if (assumptions.length) result.spec.executionAssumptions = assumptions;
   result.spec.modules = {
-    version: 1,
+    version: repeated ? 2 : 1,
     instances: instances
       .sort((a, b) => compare(JSON.stringify(a.path), JSON.stringify(b.path)))
       .map((item): JsonObject => ({

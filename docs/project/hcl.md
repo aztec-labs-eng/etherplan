@@ -49,4 +49,6 @@ resource "check" "setOwnerResult" {
 }
 ```
 
+References accept record field paths such as `var.bridges.dai.rate`. The only supported index expression is `module.<name>[<constant string key>].<output>`, which selects an instance of a [repeated module call](modules.md#keyed-repetition). Keys can come from variables, locals or the repeated call's `each.key` and `each.value` fields. Variable and list indexing, splats, functions, `for` expressions and dynamic blocks remain unsupported.
+
 [Next: Variables](variables.md)

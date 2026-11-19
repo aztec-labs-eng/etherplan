@@ -10,6 +10,7 @@ import {
   checkReferences,
   describeValue,
   literal,
+  readFields,
 } from './evaluate.ts';
 import { assertNotSecret, declareVariables, resolveVariables } from './variables.ts';
 import { MIXER, MIXER_HINT, deriveSalt } from '../spec/salt.ts';
@@ -29,6 +30,7 @@ import type {
   HclBody,
   HclDocument,
   HclExpression,
+  HclReference,
   Located,
 } from './types.ts';
 
@@ -505,9 +507,9 @@ export function compileProject(
   const scope: NameScope = {
     ...(module
       ? {
-          moduleOutput(name: string, output: string, node: Located) {
+          moduleOutput(name: string, output: string, node: HclReference) {
             assert(
-              module.hasOutput(name, output),
+              module.hasOutput(name, output, node),
               node,
               `Unknown module output module.${name}.${output}.`,
             );
@@ -520,6 +522,8 @@ export function compileProject(
         node,
         `${what} uses undeclared variable ${name}. Declare it with variable "${name}" {}.`,
       );
+      if (node.parts.length > 2)
+        readFields(variables.get(name)!.value, node.parts.slice(2), node, what);
     },
     locals,
     declared: (root, name) => names[root].has(name),
@@ -534,11 +538,12 @@ export function compileProject(
     local?: string,
     salt?: (node: Located) => void,
     createdTarget = false,
+    each = false,
   ) =>
     checkReferences(
       node,
       what,
-      scope,
+      each ? { ...scope, each } : scope,
       (root, name) => {
         if (root === 'var') usedVariables.add(name);
         else {
@@ -576,7 +581,8 @@ export function compileProject(
       );
     }
   }
-  for (const node of module?.inputs ?? []) check(node, 'module input');
+  for (const input of module?.inputs ?? [])
+    check(input.value, 'module input', undefined, undefined, false, input.each);
   const outputBlocks = document.blocks.filter((block) => block.type === 'output');
   for (const block of outputBlocks) {
     assert(block.labels.length === 1, block, 'An output needs one name label.');

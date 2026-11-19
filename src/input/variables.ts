@@ -56,6 +56,17 @@ export function assertNotSecret(name: string, node: Located): void {
     fail(node, `${name} is a forbidden signer secret. Keep signer keys in the environment.`);
 }
 
+function assertRecordFields(value: JsonValue, node: Located): void {
+  if (Array.isArray(value)) {
+    for (const item of value) assertRecordFields(item, node);
+  } else if (value !== null && typeof value === 'object') {
+    for (const [name, item] of Object.entries(value)) {
+      assertNotSecret(name, node);
+      assertRecordFields(item, node);
+    }
+  }
+}
+
 export function typeName(type: VariableType): string {
   return type.kind === 'list' ? `list(${typeName(type.element)})` : type.kind;
 }
@@ -187,6 +198,7 @@ export function declareVariables(blocks: HclBlock[]): Map<string, VariableDeclar
     const declaration: VariableDeclaration = { name, type, block };
     if (fallback) {
       const value = literal(fallback, 'default');
+      assertRecordFields(value, fallback);
       if (!conforms(value, type))
         fail(
           fallback,
@@ -229,6 +241,7 @@ export function resolveVariables(
           `${name} is not declared. Add variable "${name}" {} to the .ethp file, or remove it from ${file.file}.`,
         );
       const value = literal(attribute.value, `Variable ${name}`);
+      assertRecordFields(value, attribute.value);
       if (!conforms(value, declaration.type))
         fail(
           attribute.value,

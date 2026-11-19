@@ -33,6 +33,8 @@ export interface HclLiteral extends Located {
 export interface HclReference extends Located {
   kind: 'reference';
   parts: string[];
+  /** Only module.<name>[<constant key>].<output> accepts an index. */
+  key?: HclExpression;
 }
 
 export interface HclList extends Located {
