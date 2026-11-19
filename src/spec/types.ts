@@ -115,9 +115,9 @@ export interface Factory {
   codeHash: Hash;
 }
 
-/** A declared reason why a constructor or library reference needs no execution edge. */
+/** A declared reason why a constructor, method argument or library reference needs no execution edge. */
 export interface ExecutionAssumption {
-  consumer: `contract:${string}`;
+  consumer: `contract:${string}` | `call:${string}`;
   location: string;
   reference: string;
   reason: string;

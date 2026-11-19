@@ -746,7 +746,7 @@ export function compileProject(
       const fields = new Map(item.entries.map((entry) => [entry.key, entry.value]));
       for (const entry of item.entries)
         assert(
-          ASSUMPTION_FIELDS.includes(entry.key),
+          ASSUMPTION_FIELDS.includes(entry.key) || entry.key === 'enabled',
           entry,
           `Execution assumption has unknown attribute ${entry.key}.`,
         );
@@ -755,6 +755,12 @@ export function compileProject(
         item,
         `An execution assumption needs ${ASSUMPTION_FIELDS.join(', ')}.`,
       );
+      const enabled = fields.get('enabled');
+      if (enabled) {
+        const value = evaluator.constant(enabled, 'assumption enabled');
+        assert(typeof value === 'boolean', enabled, 'Assumption enabled must be a boolean.');
+        if (!value) return [];
+      }
       const reference = fields.get('reference');
       assert(reference, item, 'An execution assumption needs reference.');
       assert(
@@ -769,10 +775,10 @@ export function compileProject(
       const consumer = evaluator.resource(
         fields.get('consumer')!,
         'consumer',
-        ['contracts'],
+        ['contracts', 'calls'],
         false,
       );
-      if (disabled.has(`contracts.${consumer.name}`)) return [];
+      if (disabled.has(`${consumer.root}.${consumer.name}`)) return [];
       live('contracts', reference.parts[1]!, reference, 'reference');
       return [
         {

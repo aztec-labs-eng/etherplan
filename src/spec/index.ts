@@ -10,6 +10,7 @@ import type {
   OrderedNode,
   ParsedSpec,
   ResolvedAddresses,
+  SpecCall,
   SpecContract,
   SpecValue,
 } from './types.ts';
@@ -240,23 +241,32 @@ function validateReferences(spec: ParsedSpec): void {
   }
 }
 
-function creationReferences(item: SpecContract): (ReferenceDetail & { text: string })[] {
+function executionReferences(
+  item: SpecContract | SpecCall,
+): (ReferenceDetail & { text: string })[] {
   return [
     ...referenceDetails(item.args, 'args').map((detail) => ({
       ...detail,
-      text: 'constructor references',
+      text: 'target' in item ? 'call argument references' : 'constructor references',
     })),
-    ...referenceDetails(item.libraries, 'libraries').map((detail) => ({
-      ...detail,
-      text: 'links library',
-    })),
+    ...referenceDetails('target' in item ? undefined : item.libraries, 'libraries').map(
+      (detail) => ({
+        ...detail,
+        text: 'links library',
+      }),
+    ),
   ].filter(({ reference }) => reference.startsWith('contracts.'));
 }
 
-function validateAssumptions(contracts: SpecContract[], assumptions: unknown[]): void {
-  const byId = new Map(
-    contracts.map((item): [string, SpecContract] => [`contract:${item.id}`, item]),
-  );
+function validateAssumptions(
+  contracts: SpecContract[],
+  calls: SpecCall[],
+  assumptions: unknown[],
+): void {
+  const byId = new Map<string, SpecContract | SpecCall>([
+    ...contracts.map((item): [string, SpecContract] => [`contract:${item.id}`, item]),
+    ...calls.map((item): [string, SpecCall] => [`call:${item.id}`, item]),
+  ]);
   const seen = new Set<string>();
   for (const assumption of assumptions) {
     assert(isObject(assumption), 'Spec executionAssumptions must contain objects.');
@@ -274,11 +284,11 @@ function validateAssumptions(contracts: SpecContract[], assumptions: unknown[]):
     assert(
       typeof assumption.location === 'string' &&
         typeof assumption.reference === 'string' &&
-        creationReferences(consumer).some(
+        executionReferences(consumer).some(
           (detail) =>
             detail.location === assumption.location && detail.reference === assumption.reference,
         ),
-      `Execution assumption for ${assumption.consumer} must identify a real constructor or library reference and location.`,
+      `Execution assumption for ${assumption.consumer} must identify a real ${'target' in consumer ? 'call argument' : 'constructor or library'} reference and location.`,
     );
     assert(
       typeof assumption.reason === 'string' && assumption.reason.trim().length > 0,
@@ -585,7 +595,7 @@ export function parseSpec(raw: unknown): ParsedSpec {
   // The checks above are the runtime half of ParsedSpec; the reference and assumption checks need the typed shape.
   const parsed = spec as unknown as ParsedSpec;
   validateReferences(parsed);
-  validateAssumptions(parsed.contracts, parsed.executionAssumptions ?? []);
+  validateAssumptions(parsed.contracts, parsed.calls, parsed.executionAssumptions ?? []);
   return parsed;
 }
 
@@ -746,9 +756,9 @@ export function dependencyWarnings(spec: ParsedSpec, ordered: OrderedNode[]): st
   const assumptions = spec.executionAssumptions ?? [];
   const warnings: string[] = [];
   for (const node of ordered) {
-    if (node.kind !== 'contract') continue;
-    // Creation code can call a constructor argument or a linked library, so both need an edge or an assumption.
-    for (const { reference, location, text } of creationReferences(node.item)) {
+    if (node.kind === 'external') continue;
+    // Constructors and methods can read referenced contracts; each use needs an edge or an assumption.
+    for (const { reference, location, text } of executionReferences(node.item)) {
       const name = reference.split('.')[1];
       const dependency: ContractId = `contract:${name}`;
       if (
@@ -761,7 +771,7 @@ export function dependencyWarnings(spec: ParsedSpec, ordered: OrderedNode[]): st
         )
       ) {
         warnings.push(
-          `${node.id} ${text} ${reference} without an execution dependency; confirm its constructor does not call the referenced contract.`,
+          `${node.id} ${text} ${reference} without an execution dependency; confirm its ${node.kind === 'call' ? 'method' : 'constructor'} does not call the referenced contract.`,
         );
       }
     }
