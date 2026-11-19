@@ -44,6 +44,7 @@ async function runScenario(parallel) {
     const planned = runCli(
       [
         'plan',
+        '--json',
         '--fixture',
         specFile,
         '--out',

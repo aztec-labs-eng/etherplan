@@ -20,7 +20,7 @@ Set `ETH_RPC_URL` to the target RPC endpoint for a live plan. Plan reads the cha
 etherplan plan --deployers 0xYourDeployer --owner 0xYourOwner --max-spend-wei 100000000000000000 --out plan.json
 ```
 
-`plan` saves `plan.json` in the working directory by default and also prints it as JSON. Use `--out path/to/plan.json` to choose a file, or `--out -` to print without saving.
+`plan` prints a readable report with one line per resource, warnings, and reasons for conflicts or missing proof. It saves the full JSON to `plan.json` in the working directory by default. Use `--out path/to/plan.json` to choose a file, or `--out -` to skip the local file. Use `--json` to print the full JSON instead of the readable report; for example, `etherplan plan --json --out -` with the required signer and spend options. CI jobs that need the full plan in their logs must request `--json` or retain the saved file.
 
 | Command | Structural checks | Artifact and ABI checks | Live-chain checks |
 | --- | --- | --- | --- |

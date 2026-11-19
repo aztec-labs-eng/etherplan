@@ -119,6 +119,7 @@ test('apply rejects a spec changed after planning before any signature', async (
     const planned = runSync(
       [
         'plan',
+        '--json',
         '--fixture',
         ws.specFile,
         '--out',
@@ -168,6 +169,7 @@ test('an insufficient deployer balance stops before signing and resumes after fu
     const planned = runSync(
       [
         'plan',
+        '--json',
         '--fixture',
         ws.specFile,
         '--out',
@@ -238,6 +240,7 @@ test('CLI replans from a verified deployment in the journal after a later call f
     const first = runSync(
       [
         'plan',
+        '--json',
         '--fixture',
         ws.specFile,
         '--out',
@@ -278,6 +281,7 @@ test('CLI replans from a verified deployment in the journal after a later call f
     const corrected = runSync(
       [
         'plan',
+        '--json',
         '--fixture',
         ws.specFile,
         '--out',
@@ -329,6 +333,7 @@ test('a consumed signed nonce keeps the first signature live on later runs', asy
     const planned = runSync(
       [
         'plan',
+        '--json',
         '--fixture',
         ws.specFile,
         '--out',

@@ -101,3 +101,54 @@ export function formatVerifyReport(plan: Plan): string {
   );
   return `${lines.join('\n')}\n`;
 }
+
+export function formatPlanReport(plan: Plan, project: string, workspace: string): string {
+  const lines = [
+    `Plan for ${project} / ${workspace} (chain ${plan.chain.id})`,
+    `Plan hash: ${plan.planHash}`,
+  ];
+  const signers = plan.signers ?? plan.pipeline;
+  if (signers)
+    lines.push(
+      `Signers: deployer ${signers.deployers.join(', ')}${signers.owner ? `; owner ${signers.owner}` : ''}`,
+    );
+  if (plan.maxSpendWei) lines.push(`Spend ceiling per signer: ${plan.maxSpendWei} wei`);
+  const counts = { deploy: 0, call: 0, reuse: 0, conflict: 0, unverified: 0 };
+  lines.push('');
+  for (const resource of plan.resources) {
+    counts[resource.action]++;
+    const call =
+      resource.kind === 'call'
+        ? `; ${resource.method}(${resource.args.map((arg) => JSON.stringify(arg)).join(', ')})${resource.action === 'reuse' ? ' already satisfied' : ''}`
+        : '';
+    lines.push(`  ${resource.id}: ${resource.action.toUpperCase()} at ${resource.address}${call}`);
+    if (resource.observation?.stateComparison?.replacement)
+      lines.push(`    Replaces ${resource.observation.stateComparison.previousAddress}.`);
+    if (resource.action === 'conflict' || resource.action === 'unverified') {
+      const reasons = new Set([
+        ...resource.observation.reasons,
+        ...resource.observation.missingProofs,
+      ]);
+      for (const reason of reasons) lines.push(`    ${reason}`);
+    }
+  }
+  const warnings = plan.formatVersion === 2 ? plan.warnings : [];
+  for (const warning of warnings) lines.push(`Warning: ${warning}`);
+  const totals = [
+    [counts.deploy, 'deployment'],
+    [counts.call, 'call'],
+    [counts.reuse, 'reuse'],
+    [counts.conflict, 'conflict'],
+    [counts.unverified, 'unverified resource'],
+  ] as const;
+  const summary = totals
+    .filter(([count]) => count > 0)
+    .map(([count, label]) => countText(count, label))
+    .join(', ');
+  const blocked = counts.conflict + counts.unverified > 0;
+  lines.push(
+    '',
+    `${blocked ? 'Plan blocked' : 'Plan complete'}: ${!blocked && counts.deploy + counts.call === 0 ? `no changes; ${countText(counts.reuse, 'resource')} reused` : summary}${warnings.length ? `; ${countText(warnings.length, 'warning')}` : ''}.`,
+  );
+  return `${lines.join('\n')}\n`;
+}

@@ -59,6 +59,7 @@ export const COMMANDS = {
     description: 'Inspect the chain and save a reviewable plan.',
     options: [
       'out',
+      'json',
       'state',
       'journal',
       'backend',

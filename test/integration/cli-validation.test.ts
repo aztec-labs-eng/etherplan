@@ -173,6 +173,7 @@ test('fresh CREATE2 getter error blocks plan and apply before signing or broadca
     const good = cli(
       [
         'plan',
+        '--json',
         '--fixture',
         ws.specFile,
         '--out',
@@ -190,7 +191,10 @@ test('fresh CREATE2 getter error blocks plan and apply before signing or broadca
     ws.spec.contracts[0].checks.BENEFICIARY_TYPO = ws.spec.contracts[0].checks.BENEFICIARY;
     delete ws.spec.contracts[0].checks.BENEFICIARY;
     await save(ws);
-    const invalid = cli(['plan', '--fixture', ws.specFile, '--state', ws.stateFile], anvil.rpcUrl);
+    const invalid = cli(
+      ['plan', '--json', '--fixture', ws.specFile, '--state', ws.stateFile],
+      anvil.rpcUrl,
+    );
     assert.equal(invalid.status, 1);
     assert.match(invalid.stderr, /BENEFICIARY_TYPO.*no ABI function/);
     assert.equal(invalid.stdout, '');
@@ -233,6 +237,7 @@ test('an already satisfied call still rejects a misspelled write method', async 
     const planned = cli(
       [
         'plan',
+        '--json',
         '--fixture',
         ws.specFile,
         '--out',
@@ -261,7 +266,7 @@ test('an already satisfied call still rejects a misspelled write method', async 
     );
     assert.equal(applied.status, 0, applied.stderr);
     const satisfied = cli(
-      ['plan', '--fixture', ws.specFile, '--state', ws.stateFile, ...planArgs],
+      ['plan', '--json', '--fixture', ws.specFile, '--state', ws.stateFile, ...planArgs],
       anvil.rpcUrl,
     );
     assert.equal(satisfied.status, 0, satisfied.stderr);
@@ -270,7 +275,10 @@ test('an already satisfied call still rejects a misspelled write method', async 
     const nonce = await anvil.rpc('eth_getTransactionCount', [signer, 'latest']);
     ws.spec.calls[0].method = 'setBnding';
     await save(ws);
-    const invalid = cli(['plan', '--fixture', ws.specFile, '--state', ws.stateFile], anvil.rpcUrl);
+    const invalid = cli(
+      ['plan', '--json', '--fixture', ws.specFile, '--state', ws.stateFile],
+      anvil.rpcUrl,
+    );
     assert.equal(invalid.status, 1);
     assert.match(invalid.stderr, /call:bind method setBnding.*no ABI function/);
     assert.equal(await anvil.rpc('eth_getTransactionCount', [signer, 'latest']), nonce);

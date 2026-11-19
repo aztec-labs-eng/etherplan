@@ -104,7 +104,7 @@ export async function apply(context: ChainCommandContext): Promise<void> {
       signers: { ...addresses, parallel: options.parallel ?? false },
       maxSpendWei: options['max-spend-wei'],
     });
-    await approvePlan(plan);
+    await approvePlan(plan, path.basename(path.dirname(context.specFile)), context.workspace);
     if (planningBackend?.planStore) {
       await planningBackend.planStore.put(planningBackend.scope, plan);
     } else {

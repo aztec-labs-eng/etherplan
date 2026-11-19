@@ -94,7 +94,7 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
       workspace,
     });
   const ordered = graph(spec);
-  const context = { options, specFile, spec, ordered };
+  const context = { options, specFile, workspace, spec, ordered };
   if (command === 'compile') return compile(context);
   if (command === 'graph') return graphCommand(context);
   if (command === 'impact') return impact(context);

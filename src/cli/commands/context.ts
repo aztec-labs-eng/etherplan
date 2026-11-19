@@ -8,6 +8,7 @@ export interface CommandContext {
 }
 export interface SpecCommandContext extends CommandContext {
   specFile: string;
+  workspace: string;
   spec: ParsedSpec;
   ordered: OrderedNode[];
 }
