@@ -18,7 +18,7 @@ import type {
 export const PERMISSIONLESS_FACTORY_CODE_HASHES = new Set([
   '0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989',
 ]);
-const APPLICABLE = new Set(['reuse', 'deploy', 'call']);
+const APPLICABLE = new Set(['reuse', 'verify', 'deploy', 'call']);
 const OWNER_LANE = 'owner';
 
 /** An action with its lane and plan position, before a batch assigns its signer. */
@@ -47,7 +47,7 @@ export function executionWaves(resources: SchedulableResource[]): ExecutionWaves
   );
   const remaining = new Map(
     resources
-      .filter((resource) => ['deploy', 'call'].includes(resource.action))
+      .filter((resource) => ['deploy', 'call', 'verify'].includes(resource.action))
       .map((resource): [ResourceId, SchedulableResource] => [resource.id, resource]),
   );
   const waves: ResourceId[][] = [];
@@ -71,14 +71,35 @@ export function executionWaves(resources: SchedulableResource[]): ExecutionWaves
   };
 }
 
+export function normalizeNamedSigners(named: Record<string, string> = {}): Record<string, Address> {
+  assert(
+    named !== null && typeof named === 'object' && !Array.isArray(named),
+    'Named signers must be an object.',
+  );
+  return Object.fromEntries(
+    Object.entries(named)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([role, address]) => {
+        assert(
+          /^[a-z][a-zA-Z0-9_-]*$/.test(role) && !['deployer', 'owner'].includes(role),
+          `Invalid named signer role ${role}.`,
+        );
+        assert(isUserAddress(address), `Named signer ${role} needs a valid address.`);
+        return [role, address.toLowerCase() as Address];
+      }),
+  );
+}
+
 function laneFor(
   resource: SchedulableResource,
   primary: Address,
   owner: Address | null,
+  named: Record<string, Address>,
 ): { role: LaneRole; lane: Lane } {
   const role = resource.signerRole ?? (resource.kind === 'call' ? 'owner' : 'deployer');
   if (role === 'deployer') return { role, lane: primary };
   if (role === 'owner') return { role, lane: owner ?? OWNER_LANE };
+  if (Object.hasOwn(named, role)) return { role, lane: named[role]! };
   throw new Error(`${resource.id} needs signer role ${role}, which has no lane.`);
 }
 
@@ -146,6 +167,7 @@ export function createSchedule(
     owner === null || isUserAddress(owner),
     'Owner must be an Ethereum address with a valid mixed-case checksum.',
   );
+  const named = normalizeNamedSigners(options.named);
   const ownerLane = owner === null ? null : (owner.toLowerCase() as Address);
   const blocked = plan.resources.filter((resource) => !APPLICABLE.has(resource.action));
   assert(
@@ -166,7 +188,7 @@ export function createSchedule(
     const { action } = resource;
     // `blocked` is empty, so every action that is not a reuse is a deploy or a call.
     if (action !== 'deploy' && action !== 'call') return [];
-    const { role, lane } = laneFor(resource, primary, ownerLane);
+    const { role, lane } = laneFor(resource, primary, ownerLane, named);
     const pooled = parallel && pool.length > 1 && poolable(resource);
     return [
       {
@@ -184,16 +206,29 @@ export function createSchedule(
   });
 
   const remaining = new Map(
-    actions.map((action): [ResourceId, PendingAction] => [action.id, action]),
+    plan.resources
+      .filter((resource) => ['deploy', 'call', 'verify'].includes(resource.action))
+      .map((resource) => [resource.id, resource]),
   );
+  const transactions = new Map(actions.map((action) => [action.id, action]));
   const waves: ScheduleWave[] = [];
   while (remaining.size > 0) {
     const ready = [...remaining.values()].filter((action) =>
       dependenciesOf(action.id).every((dep) => satisfied.has(dep)),
     );
     if (ready.length === 0) break;
-    const batches = pack(ready, pool, parallel, pipeline).map((batch) => batch.map(strip));
-    const wave: ScheduleWave = { wave: waves.length + 1, batches };
+    const checks = ready.filter((item) => item.action === 'verify').map((item) => item.id);
+    const batches = pack(
+      ready.flatMap((item) => (transactions.has(item.id) ? [transactions.get(item.id)!] : [])),
+      pool,
+      parallel,
+      pipeline,
+    ).map((batch) => batch.map(strip));
+    const wave: ScheduleWave = {
+      wave: waves.length + 1,
+      batches,
+      ...(checks.length ? { verifications: checks } : {}),
+    };
     if (pipeline) {
       const groups = new Map<Lane, SignerGroup['actions']>();
       for (const entry of batches.flat()) {
@@ -203,7 +238,7 @@ export function createSchedule(
         else groups.set(entry.signer, [item]);
       }
       wave.signerGroups = [...groups].map(([signer, actions]) => ({ signer, actions }));
-      wave.receiptBarrier = true;
+      if (batches.length) wave.receiptBarrier = true;
     }
     waves.push(wave);
     for (const action of ready) {

@@ -232,13 +232,28 @@ export function validateState(state: unknown): StateFile {
   assert(isObject(state), 'State must be an object.');
   assertNoSecrets(state);
   assert(
-    Object.keys(state).every(
-      (key) =>
-        key === 'formatVersion' || key === 'chain' || key === 'resources' || key === 'lastPlanHash',
+    Object.keys(state).every((key) =>
+      [
+        'formatVersion',
+        'chain',
+        'resources',
+        'lastPlanHash',
+        'moduleRoot',
+        'journalSequence',
+      ].includes(key),
     ),
     'State has unknown fields.',
   );
+  assert(
+    state.moduleRoot === undefined || state.moduleRoot === true,
+    'State moduleRoot must be true when present.',
+  );
   assert(state.formatVersion === 1, 'State must have formatVersion: 1.');
+  assert(
+    state.journalSequence === undefined ||
+      (Number.isSafeInteger(state.journalSequence) && (state.journalSequence as number) >= 0),
+    'State journalSequence must be a nonnegative integer.',
+  );
   if (state.lastPlanHash !== undefined) assertHash(state.lastPlanHash, 'State lastPlanHash');
   validateChain(state.chain);
   assert(isObject(state.resources), 'State resources must be an object.');
@@ -465,6 +480,8 @@ export function importResource({
   if (sourceHash !== undefined) record.sourceHash = sourceHash;
   setSaltDerivation(record, resource);
   const imported = {
+    ...(state.moduleRoot ? { moduleRoot: state.moduleRoot } : {}),
+    ...(state.journalSequence === undefined ? {} : { journalSequence: state.journalSequence }),
     formatVersion: 1,
     chain: { ...state.chain },
     resources: { ...state.resources, [resource.id]: record },
@@ -618,6 +635,8 @@ export function recordResource({
   if (sourceHash !== undefined) record.sourceHash = sourceHash;
   setSaltDerivation(record, resource);
   return validateState({
+    ...(state.moduleRoot ? { moduleRoot: state.moduleRoot } : {}),
+    ...(state.journalSequence === undefined ? {} : { journalSequence: state.journalSequence }),
     formatVersion: 1,
     chain: { ...state.chain },
     resources: { ...state.resources, [resource.id]: record },

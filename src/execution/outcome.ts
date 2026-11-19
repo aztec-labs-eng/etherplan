@@ -61,7 +61,7 @@ export async function verify(
 ): Promise<VerificationResult> {
   const id = item.planned.id;
   const outcome = ctx.outcomes.get(id);
-  const saved =
+  let saved =
     options.creationProof ??
     (outcome && 'verification' in outcome ? outcome.verification.creationProof : undefined) ??
     ctx.stateSnapshot?.resources?.[id]?.creationProof ??
@@ -71,6 +71,18 @@ export async function verify(
     saved?.transactionHash ??
     ctx.stateSnapshot?.resources?.[id]?.provenance?.creationTransactionHash ??
     ctx.stateSnapshot?.resources?.[id]?.transactions?.at(-1);
+  if (saved && options.creationProof === undefined && transactionHash) {
+    const currentReceipt = ctx.journal
+      .forAction(ctx.plan.planHash, id)
+      .filter(
+        (record): record is JournalRecord & import('./types.ts').ReceiptFields =>
+          record.phase === 'receipt' &&
+          record.transactionHash.toLowerCase() === transactionHash.toLowerCase(),
+      )
+      .at(-1)?.receipt;
+    if (currentReceipt && currentReceipt.blockHash.toLowerCase() !== saved.blockHash.toLowerCase())
+      saved = undefined;
+  }
   // An explicit journal proof must be checked even if its hash disagrees with
   // the record. A proof from previous state may belong to a replaced address.
   const creationProof =
@@ -259,6 +271,7 @@ export async function stableReceipt(
   actionId: ResourceId,
   wait = false,
   retry: ReceiptRetryOptions = receiptRetryOptions(ctx.config),
+  confirmations = 1,
 ): Promise<Receipt> {
   const deadline = retry.deadline;
   const anchor = { number: BigInt(receipt.blockNumber), hash: receipt.blockHash.toLowerCase() };
@@ -280,16 +293,16 @@ export async function stableReceipt(
     }
     if (current && block) {
       const depth =
-        ctx.config.confirmations === 1
+        confirmations === 1
           ? 1n
           : (await retryRead(() => ctx.client.getBlock({ blockTag: 'latest' }), retry)).number -
             current.blockNumber +
             1n;
-      if (depth >= BigInt(ctx.config.confirmations)) return current;
+      if (depth >= BigInt(confirmations)) return current;
       if (!wait || Date.now() >= deadline)
         throw new ApplyError(
           'finality',
-          `Transaction ${transactionHash} has fewer than ${ctx.config.confirmations} confirmations.`,
+          `Transaction ${transactionHash} has fewer than ${confirmations} confirmations.`,
           { actionId, retryable: true },
         );
     } else if (Date.now() >= deadline) {
@@ -303,7 +316,44 @@ export async function stableReceipt(
   }
 }
 
-export async function revalidateVerified(ctx: ApplyContext): Promise<void> {
+async function reopenVerified(ctx: ApplyContext): Promise<void> {
+  for (const item of ctx.prepared.values()) {
+    const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
+    const latest = records.at(-1);
+    if (latest?.phase !== 'verified') continue;
+    const hash = latest.transactionHash ?? latest.revertedTransaction;
+    if (!hash) continue;
+    const signed = records
+      .filter(
+        (record): record is SignedRecord =>
+          record.phase === 'signed' && record.transactionHash.toLowerCase() === hash.toLowerCase(),
+      )
+      .at(-1);
+    if (!signed)
+      throw new ApplyError(
+        'journal',
+        `Reorganized action ${item.planned.id} has no signed bytes.`,
+        { actionId: item.planned.id },
+      );
+    // Reopen this action for its saved-signature recovery path. Never allocate another nonce here.
+    await append(ctx, item.planned.id, {
+      phase: 'broadcast-attempt',
+      reorgRecovery: true,
+      signer: signed.signer,
+      nonce: signed.nonce,
+      transactionHash: signed.transactionHash,
+      rebroadcast: true,
+      ...(signed.reservationId ? { reservationId: signed.reservationId } : {}),
+    });
+    ctx.outcomes.delete(item.planned.id);
+  }
+}
+
+export async function revalidateVerified(
+  ctx: ApplyContext,
+  wait = false,
+  confirmations = 1,
+): Promise<void> {
   const retry = receiptRetryOptions(ctx.config);
   for (const item of ctx.prepared.values()) {
     const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
@@ -321,7 +371,13 @@ export async function revalidateVerified(ctx: ApplyContext): Promise<void> {
       throw new ApplyError('journal', `Verified action ${item.planned.id} has no receipt.`, {
         actionId: item.planned.id,
       });
-    await stableReceipt(ctx, hash, receipt, item.planned.id, false, retry);
+    try {
+      await stableReceipt(ctx, hash, receipt, item.planned.id, wait, retry, confirmations);
+    } catch (error) {
+      if (!(error instanceof ApplyError) || error.code !== 'reorg') throw error;
+      await reopenVerified(ctx);
+      throw error;
+    }
   }
 }
 
@@ -620,9 +676,14 @@ export function assertRecoveryEvidence(ctx: ApplyContext): void {
   }
 }
 
-export async function recheckReused(ctx: ApplyContext): Promise<void> {
+export async function recheckReused(
+  ctx: ApplyContext,
+  verifications?: ResourceId[],
+): Promise<void> {
   for (const item of ctx.prepared.values()) {
-    if (item.planned.action !== 'reuse') continue;
+    if (verifications ? !verifications.includes(item.planned.id) : item.planned.action !== 'reuse')
+      continue;
+    if (verifications) await checkExecutionDependencies(ctx, [{ item }]);
     const verification = await verifyCurrent(ctx, item);
     if (verification.status !== 'verified') {
       throw new ApplyError(

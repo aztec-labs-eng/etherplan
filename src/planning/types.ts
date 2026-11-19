@@ -1,5 +1,6 @@
 // Prepared resources and the saved plan. Source of truth: prepareResources and transactionFor in resources.ts;
 // planResource, decide, compareState, artifactDrift, and createPlan in index.ts.
+import type { ProjectModules } from '../spec/modules.ts';
 import type { Artifacts, NormalizedArtifact } from '../artifacts/types.ts';
 import type { ScheduleWave } from '../scheduling/types.ts';
 import type {
@@ -41,12 +42,15 @@ export interface PreparedCreatedCode {
 }
 
 export type PreparedCallCheck = {
+  address?: Address;
   functionName: string;
   args: JsonValue[];
 };
 
 /** The binding getter with the value it must hold before (`before`) or after (`after`) the call. */
 export type PreparedBinding = {
+  address?: Address;
+  absent?: true;
   functionName: string;
   args: JsonValue[];
   expected: JsonValue;
@@ -71,6 +75,7 @@ export interface PreparedExternal extends PreparedBase {
 }
 
 export interface PreparedContract extends PreparedBase {
+  createdBy?: `call:${string}`;
   id: ContractId;
   kind: 'contract';
   artifact: NormalizedArtifact;
@@ -101,8 +106,8 @@ export interface PreparedContract extends PreparedBase {
 export interface PreparedCall extends PreparedBase {
   kind: 'call';
   id: CallId;
-  targetId: ContractId;
-  targetArtifact: NormalizedArtifact;
+  targetId: ContractId | ExternalId;
+  targetArtifact?: NormalizedArtifact;
   abi: NormalizedArtifact['abi'];
   method: string;
   args: JsonValue[];
@@ -136,7 +141,7 @@ export interface PlannedTransaction {
   value: DecimalString;
 }
 
-export type PlanAction = 'reuse' | 'deploy' | 'call' | 'conflict' | 'unverified';
+export type PlanAction = 'verify' | 'reuse' | 'deploy' | 'call' | 'conflict' | 'unverified';
 
 /** Why a plan accepts a rebuilt artifact for an unchanged CREATE2 deployment, or why it does not. */
 export interface ArtifactDrift {
@@ -205,6 +210,7 @@ interface PlannedBase {
 }
 
 export interface PlannedContract extends PlannedBase {
+  createdBy?: `call:${string}`;
   kind: 'contract';
   artifactHash: Hash;
   initcodeHash?: Hash;
@@ -231,7 +237,7 @@ export interface PlannedExternal extends PlannedBase {
 
 export interface PlannedCall extends PlannedBase {
   kind: 'call';
-  targetId: `contract:${string}`;
+  targetId: ContractId | ExternalId;
   method: string;
   args: JsonValue[];
   check: PreparedCallCheck;
@@ -247,6 +253,7 @@ export type PlannedResource = PlannedContract | PlannedExternal | PlannedCall;
 
 /** Lowercase addresses pinned at plan time; apply refuses different signers. */
 export interface PlanSigners {
+  named?: Record<string, Address>;
   deployers: Address[];
   owner: Address | null;
   parallel: boolean;
@@ -257,6 +264,7 @@ export interface PlanPipeline extends PlanSigners {
 }
 
 interface PlanBase {
+  modules?: ProjectModules;
   chain: ChainIdentity;
   observed: { blockNumber: DecimalString; blockHash: Hash };
   /** Hash of the state the plan was created against (`hashJson(null)` when there was none). */
@@ -295,6 +303,7 @@ export type Plan = PlanV1 | PlanV2;
 
 /** Signer addresses for a plan; `deployers[0]` alone is used unless `parallel`. */
 export interface PlanSignerInput {
+  named?: Record<string, string>;
   deployers: string[];
   owner?: string | null;
   parallel?: boolean;

@@ -1,5 +1,5 @@
 import { hashJson } from '../identity.ts';
-import { createSchedule } from '../scheduling/index.ts';
+import { createSchedule, normalizeNamedSigners } from '../scheduling/index.ts';
 import { preflight } from './preflight.ts';
 import { ApplyError } from './errors.ts';
 import { isRpcError, safeRpcMessage } from './rpc-error.ts';
@@ -112,7 +112,13 @@ async function persist(ctx: ApplyContext): Promise<StateWriteResult> {
     throw new ApplyError('stale-state', 'Verified resources did not produce a state file.');
   await assertCanonicalSnapshot(ctx, snapshot);
   await ctx.lock.assertHeld?.();
-  await ctx.writeState(current.version, { ...state, lastPlanHash: ctx.plan.planHash });
+  await ctx.writeState(current.version, {
+    ...state,
+    ...(ctx.deps.parseSpec(ctx.spec).modules || state.moduleRoot
+      ? { moduleRoot: true as const, journalSequence: ctx.journal.records.length }
+      : {}),
+    lastPlanHash: ctx.plan.planHash,
+  });
   return { file: ctx.stateFile, written: true, resources: verified.length };
 }
 
@@ -156,6 +162,11 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
     );
   const deployers = ctx.lanes.pool.map((account) => account.address.toLowerCase() as Address);
   const pinned = ctx.plan.pipeline ?? ctx.plan.signers;
+  const named = normalizeNamedSigners(
+    Object.fromEntries(
+      Object.entries(ctx.lanes.named).map(([role, account]) => [role, account.address]),
+    ),
+  );
   const owner =
     ctx.pipeline || ownerActions.length || pinned?.owner
       ? ((ctx.lanes.owner?.address.toLowerCase() as Address) ?? null)
@@ -182,6 +193,7 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
     pinned &&
     (hashJson(deployers) !== hashJson(pinned.deployers) ||
       owner !== pinned.owner ||
+      hashJson(named) !== hashJson(pinned.named ?? {}) ||
       ctx.parallel !== pinned.parallel)
   ) {
     throw new ApplyError(
@@ -191,6 +203,7 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
   }
   ctx.schedule = createSchedule(ctx.plan, deployers, {
     owner,
+    named,
     parallel: ctx.parallel,
     pipeline: ctx.pipeline,
   });
@@ -216,7 +229,11 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
   await recheckReused(ctx);
   // Preserve the dependency check for a later signed wave before revisiting
   // completed earlier waves. This also stops a resend if its prerequisite drifted.
-  if (ctx.pipeline) {
+  const recoveringReorg = [...ctx.prepared.keys()].some((id) => {
+    const latest = ctx.journal.forAction(ctx.plan.planHash, id).at(-1);
+    return latest?.phase === 'broadcast-attempt' && latest.reorgRecovery;
+  });
+  if (ctx.pipeline && !recoveringReorg) {
     for (const wave of ctx.schedule.waves) {
       if (!pipelineAttempt(ctx, wave)) continue;
       const work = wave.batches.flat().map((entry) => {
@@ -234,6 +251,7 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
   }
   for (const wave of ctx.schedule.waves) {
     await revalidateVerified(ctx);
+    if (wave.verifications) await recheckReused(ctx, wave.verifications);
     if (ctx.pipeline && (await resumePipelineWave(ctx, wave))) {
       continue;
     }
@@ -244,6 +262,7 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
   }
   // Later planned writes can invalidate an earlier getter, so record state only
   // after every action has settled and all desired conditions pass together.
+  await revalidateVerified(ctx, true, ctx.config.confirmations);
   ctx.state = await persist(ctx);
   return summary(ctx, 'applied');
 }

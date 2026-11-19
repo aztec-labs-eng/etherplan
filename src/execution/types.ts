@@ -63,6 +63,7 @@ export interface SignerAccount {
 
 /** Local signing: `deployer[0]` alone is used unless `parallel`. */
 export interface Signers {
+  named?: Record<string, SignerAccount>;
   deployer: SignerAccount[];
   owner?: SignerAccount;
 }
@@ -85,11 +86,13 @@ export interface SignerProvider {
 
 /** Defaults: `deployer: ['deployer']`, `owner: 'owner'`. */
 export interface SignerRoles {
+  named?: Record<string, string>;
   deployer?: string[];
   owner?: string;
 }
 
 export interface SignerLanes {
+  named: Record<string, SignerAccount>;
   pool: SignerAccount[];
   owner: SignerAccount | null;
   /** Keyed by lowercase address. */
@@ -476,6 +479,8 @@ export type SignedFields = {
 
 export interface BroadcastAttemptFields {
   phase: 'broadcast-attempt';
+  /** A verified receipt was reorganized; recover these exact signed bytes before dependent reservations. */
+  reorgRecovery?: true;
   signer: Address;
   nonce: DecimalString;
   transactionHash: Hash;

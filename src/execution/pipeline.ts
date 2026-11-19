@@ -21,7 +21,7 @@ import {
 import { checkReplayCapabilities } from './preflight.ts';
 import { ApplyError } from './errors.ts';
 import { safeExternalError } from './rpc-error.ts';
-import { transactionFor, pause } from './shared.ts';
+import { signerFor, transactionFor, pause } from './shared.ts';
 import { commitments, signedSpend, budgetFor } from './funding.ts';
 import {
   decide,
@@ -178,7 +178,7 @@ export async function resumePipelineWave(ctx: ApplyContext, wave: ScheduleWave):
     // The reserved offset of an action is its position among the actions of its signer that
     // have an intent. It is the saved offset when the attempt left no action out.
     const entry = { ...saved, nonceOffset: groups.get(saved.signer)?.length ?? 0 };
-    const signer = ctx.lanes.byAddress.get(entry.signer);
+    const signer = signerFor(ctx, entry);
     const tx = item ? transactionFor(item) : null;
     if (
       !intent ||

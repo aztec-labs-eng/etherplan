@@ -113,6 +113,7 @@ export type HclNode = HclBody | HclAttribute | HclBlock | HclExpression;
 /** A schema 2 JSON spec for parseSpec. Loosely typed on purpose: parseSpec is the validator. */
 export interface CompiledSpec {
   schema: 2;
+  modules?: JsonObject;
   chainId: number;
   dependencyMode?: JsonValue;
   values: Record<string, JsonValue>;
