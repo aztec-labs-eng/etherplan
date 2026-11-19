@@ -122,3 +122,11 @@ export type {
   StateStore,
   StoredJournalRecord,
 } from './execution/types.ts';
+
+export { loadSpec, loadProject, compileProjectFile } from './input/project.ts';
+export { moduleResourceId } from './input/modules.ts';
+export type { ModuleBinding, ModuleInstance, ProjectModules } from './spec/modules.ts';
+export { parseHcl } from './input/hcl.ts';
+export type { HclBlock, HclExpression } from './input/types.ts';
+export { loadArtifacts } from './artifacts.ts';
+export { hashJson } from './identity.ts';

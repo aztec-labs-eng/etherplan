@@ -35,13 +35,14 @@ import type {
 } from '../types.ts';
 import type { PlanIdentityInput, PreparedAction } from './types.ts';
 
-const APPLICABLE = new Set(['reuse', 'deploy', 'call']);
+const APPLICABLE = new Set(['reuse', 'verify', 'deploy', 'call']);
 const IDENTITY_FIELDS = [
   'kind',
   'dependencies',
   'resolutionDependencies',
   'executionEdges',
   'address',
+  'createdBy',
   'artifactHash',
   'initcodeHash',
   'inputsHash',
@@ -284,6 +285,8 @@ export async function checkPlanIdentity({
   if (spec === undefined || spec === null)
     throw new ApplyError('stale-spec', 'Apply needs the spec that produced the plan.');
   const parsed = deps.parseSpec(structuredClone(spec));
+  if (!same(plan.modules, parsed.modules))
+    throw new ApplyError('stale-spec', 'The module interfaces changed after planning.');
   const specHash = hashJson(parsed);
   if (specHash !== plan.specHash)
     throw new ApplyError('stale-spec', 'The spec changed after the plan was created.', {
@@ -359,6 +362,11 @@ export async function checkPlanIdentity({
           failures.push('transaction payload differs from the planner encoding');
       }
     }
+    if (
+      planned.action === 'verify' &&
+      (fresh.kind !== 'contract' || !fresh.createdBy || fresh.initcode)
+    )
+      failures.push('verification needs a checked creator result');
     if (planned.action === 'call') {
       if (planned.kind !== 'call') failures.push('only a call resource can be called');
       else if (

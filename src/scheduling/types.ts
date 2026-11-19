@@ -70,6 +70,8 @@ export interface ScheduleWave {
   wave: number;
   /** A batch holds at most one transaction per signer. */
   batches: ScheduleEntry[][];
+  /** Zero-transaction checks after their creator prerequisites complete. */
+  verifications?: ResourceId[];
   /** Pipeline schedules only. */
   signerGroups?: SignerGroup[];
   receiptBarrier?: true;

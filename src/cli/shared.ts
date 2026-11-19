@@ -15,7 +15,7 @@ export function defaultJournalFile(stateFile: string): string {
 export async function approvePlan(plan: Plan): Promise<void> {
   process.stderr.write(`Proposed plan:\n${JSON.stringify(plan, null, 2)}\n\n`);
   const blocked = plan.resources.filter(
-    (resource) => !['reuse', 'deploy', 'call'].includes(resource.action),
+    (resource) => !['reuse', 'verify', 'deploy', 'call'].includes(resource.action),
   );
   if (blocked.length)
     throw new Error(

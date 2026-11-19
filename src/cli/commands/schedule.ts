@@ -10,7 +10,7 @@ export async function schedule(context: ChainCommandContext): Promise<void> {
   const { options, client } = context;
   const { plan } = await planFor('schedule', context);
   const blocked = plan.resources.filter(
-    (resource) => !['reuse', 'deploy', 'call'].includes(resource.action),
+    (resource) => !['reuse', 'verify', 'deploy', 'call'].includes(resource.action),
   );
   if (options.plan && blocked.length) {
     print({

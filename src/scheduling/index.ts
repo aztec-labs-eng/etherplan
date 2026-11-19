@@ -18,7 +18,7 @@ import type {
 export const PERMISSIONLESS_FACTORY_CODE_HASHES = new Set([
   '0x2fa86add0aed31f33a762c9d88e807c475bd51d0f52bd0955754b2608f7e4989',
 ]);
-const APPLICABLE = new Set(['reuse', 'deploy', 'call']);
+const APPLICABLE = new Set(['reuse', 'verify', 'deploy', 'call']);
 const OWNER_LANE = 'owner';
 
 /** An action with its lane and plan position, before a batch assigns its signer. */
@@ -47,7 +47,7 @@ export function executionWaves(resources: SchedulableResource[]): ExecutionWaves
   );
   const remaining = new Map(
     resources
-      .filter((resource) => ['deploy', 'call'].includes(resource.action))
+      .filter((resource) => ['deploy', 'call', 'verify'].includes(resource.action))
       .map((resource): [ResourceId, SchedulableResource] => [resource.id, resource]),
   );
   const waves: ResourceId[][] = [];
@@ -206,16 +206,29 @@ export function createSchedule(
   });
 
   const remaining = new Map(
-    actions.map((action): [ResourceId, PendingAction] => [action.id, action]),
+    plan.resources
+      .filter((resource) => ['deploy', 'call', 'verify'].includes(resource.action))
+      .map((resource) => [resource.id, resource]),
   );
+  const transactions = new Map(actions.map((action) => [action.id, action]));
   const waves: ScheduleWave[] = [];
   while (remaining.size > 0) {
     const ready = [...remaining.values()].filter((action) =>
       dependenciesOf(action.id).every((dep) => satisfied.has(dep)),
     );
     if (ready.length === 0) break;
-    const batches = pack(ready, pool, parallel, pipeline).map((batch) => batch.map(strip));
-    const wave: ScheduleWave = { wave: waves.length + 1, batches };
+    const checks = ready.filter((item) => item.action === 'verify').map((item) => item.id);
+    const batches = pack(
+      ready.flatMap((item) => (transactions.has(item.id) ? [transactions.get(item.id)!] : [])),
+      pool,
+      parallel,
+      pipeline,
+    ).map((batch) => batch.map(strip));
+    const wave: ScheduleWave = {
+      wave: waves.length + 1,
+      batches,
+      ...(checks.length ? { verifications: checks } : {}),
+    };
     if (pipeline) {
       const groups = new Map<Lane, SignerGroup['actions']>();
       for (const entry of batches.flat()) {
@@ -225,7 +238,7 @@ export function createSchedule(
         else groups.set(entry.signer, [item]);
       }
       wave.signerGroups = [...groups].map(([signer, actions]) => ({ signer, actions }));
-      wave.receiptBarrier = true;
+      if (batches.length) wave.receiptBarrier = true;
     }
     waves.push(wave);
     for (const action of ready) {

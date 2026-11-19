@@ -2,7 +2,7 @@
 
 Part of [Project files](index.md).
 
-`etherplan compile` turns an HCL project into a canonical Schema 2 JSON spec. A JSON spec has a positive numeric `chainId`, a `schema` of `1` or `2`, and at least one contract. It may also contain `values`, `externals`, `calls`, a CREATE2 `factory`, a dependency mode, and execution assumptions.
+`etherplan compile` turns an HCL project into a canonical Schema 2 JSON spec. A JSON spec has a positive numeric `chainId`, a `schema` of `1` or `2`, and at least one resource. It may also contain `values`, `externals`, `calls`, a CREATE2 `factory`, a dependency mode, execution assumptions, and versioned `modules` metadata. The module metadata records instance paths, public input/output bindings, readiness, and qualified resource maps. The planner uses the same resource graph and state as an ordinary project.
 
 A contract names a compiled JSON artifact and has either an existing `address` or a CREATE2 `salt`. A deployable contract has constructor `args`. A call declares its target, method, arguments, allowed `before` getter value, and desired getter value in `check`. Derived salts record their `mixer` and optional `label` alongside the hash.
 

@@ -3,6 +3,7 @@
 // spec holds only concrete values and references.
 import { fail } from './hcl.ts';
 import { MIXER, MIXER_HINT, deriveSalt } from '../spec/salt.ts';
+import { hasReference, type ModuleBinding, type ModuleContext } from './module-types.ts';
 import type { SaltDerivation } from '../spec/types.ts';
 import type { Hash, JsonValue, ResourceId } from '../types.ts';
 import type { HclAttribute, HclBinary, HclExpression, HclReference, Located } from './types.ts';
@@ -21,6 +22,7 @@ const RESOURCE_ROOTS: ReadonlySet<string> = new Set(['contracts', 'externals', '
 const HEX = /^0x[0-9a-fA-F]*$/;
 
 export interface NameScope {
+  moduleOutput?(module: string, output: string, node: Located): void;
   /** Throws if `var.<name>` has no declaration or value. `what` names the attribute. */
   variable(name: string, node: Located, what: string): void;
   locals: ReadonlyMap<string, HclAttribute>;
@@ -28,6 +30,8 @@ export interface NameScope {
 }
 
 export interface EvaluationScope {
+  created?(root: Root, name: string): boolean;
+  module?: ModuleContext;
   variables: ReadonlyMap<string, JsonValue>;
   locals: ReadonlyMap<string, HclAttribute>;
   /** Throws if a taken reference names a disabled resource. */
@@ -175,10 +179,13 @@ export function checkReferences(
     use(root, name);
     return;
   }
+  if (root === 'module' && node.parts.length === 3 && name && field && scope.moduleOutput) {
+    scope.moduleOutput(name, field, node);
+    return;
+  }
   if (!RESOURCE_ROOTS.has(root!)) unsupported();
   const addressable = root !== 'calls' && node.parts.length === 3 && field === 'address';
   const created =
-    createdTarget &&
     root === 'contracts' &&
     node.parts.length === 4 &&
     field === 'created' &&
@@ -195,11 +202,49 @@ export class Evaluator {
   declare referenced: Set<string>;
   /** The top-level mixer that derive hashes, once the compiler has evaluated it. */
   declare mixer: string | null;
+  readiness = new Set<ResourceId>();
 
   constructor(scope: EvaluationScope) {
     this.scope = scope;
     this.referenced = new Set();
     this.mixer = null;
+  }
+
+  capture<T>(work: () => T): { value: T; after: ResourceId[] } {
+    const previous = this.readiness;
+    this.readiness = new Set();
+    try {
+      return { value: work(), after: [...this.readiness].sort() };
+    } finally {
+      this.readiness = previous;
+    }
+  }
+
+  binding(node: HclExpression): ModuleBinding | undefined {
+    if (node.kind !== 'reference' || !this.scope.module) return;
+    const [root, name, output] = node.parts;
+    let binding: ModuleBinding | undefined;
+    if (root === 'module' && name && output) binding = this.scope.module.output(name, output, this);
+    else if (root === 'var' && name) binding = this.scope.module.bindings.get(name);
+    if (binding) for (const id of binding.after) this.readiness.add(id);
+    return binding;
+  }
+
+  qualified(name: string): string {
+    return this.scope.module?.qualify(name) ?? name;
+  }
+
+  input(node: HclExpression, what: string): JsonValue {
+    const inline = (value: JsonValue): JsonValue => {
+      if (Array.isArray(value)) return value.map(inline);
+      if (value !== null && typeof value === 'object') {
+        if (typeof value.ref === 'string' && value.ref.startsWith('values.'))
+          return structuredClone(this.scope.variables.get(value.ref.slice(7))!);
+        return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, inline(item)]));
+      }
+      return value;
+    };
+    return inline(this.value(node, what));
   }
 
   /** A field such as chain_id or enabled: folds to JSON with no resource references. */
@@ -240,6 +285,27 @@ export class Evaluator {
     const local = this.local(node);
     if (local)
       return this.resource(local.value, `${what} through local.${local.name}`, roots, live);
+    const binding = this.binding(node);
+    if (binding) {
+      const value = binding.value;
+      if (
+        value !== null &&
+        typeof value === 'object' &&
+        !Array.isArray(value) &&
+        typeof value.ref === 'string'
+      ) {
+        const [root, name, field] = value.ref.split('.');
+        if (
+          root &&
+          name &&
+          roots.includes(root as Root) &&
+          (field === 'address' || field === 'created')
+        )
+          return { root: root as Root, name, id: `${KINDS[root as Root]}:${name}` };
+      }
+      fail(node, `${what} needs a resource-valued module binding.`);
+    }
+
     if (!(
       node.kind === 'reference' &&
       node.parts.length === 2 &&
@@ -249,7 +315,8 @@ export class Evaluator {
     }
     const [root, name] = node.parts as [Root, string];
     if (live) this.scope.live(root, name, node, what);
-    return { root, name, id: `${KINDS[root]}:${name}` };
+    const qualified = this.qualified(name);
+    return { root, name: qualified, id: `${KINDS[root]}:${qualified}` };
   }
 
   callTarget(node: HclExpression, what: string): string {
@@ -260,6 +327,16 @@ export class Evaluator {
       );
     const local = this.local(node);
     if (local) return this.callTarget(local.value, `${what} through local.${local.name}`);
+    const binding = this.binding(node);
+    if (
+      binding?.value &&
+      typeof binding.value === 'object' &&
+      !Array.isArray(binding.value) &&
+      typeof binding.value.ref === 'string'
+    ) {
+      const [root, name, field, getter] = binding.value.ref.split('.');
+      if (root === 'contracts' && field === 'created' && getter) return `${name}.created.${getter}`;
+    }
     if (
       node.kind === 'reference' &&
       node.parts.length === 4 &&
@@ -368,10 +445,17 @@ export class Evaluator {
   reference(node: HclReference, what: string, mode: Mode): JsonValue {
     const [root, name] = node.parts as [string, string];
     const text = node.parts.join('.');
+    const binding = this.binding(node);
+    if (binding) {
+      if (mode !== 'value' && hasReference(binding.value))
+        fail(node, `${what} must be constant; module binding ${text} still references a resource.`);
+      return structuredClone(binding.value);
+    }
     if (root === 'var') {
       // A null variable is inlined even in a value field, so an attribute set to it is left unset.
       const value = this.scope.variables.get(name)!;
-      if (mode !== 'value' || value === null) return structuredClone(value);
+      if (mode !== 'value' || value === null || this.scope.module?.child)
+        return structuredClone(value);
       this.referenced.add(name);
       return { ref: `values.${name}` };
     }
@@ -403,6 +487,11 @@ export class Evaluator {
         `${what} has unsupported reference ${text}. Use var.<name>, local.<name>, contracts.<name>.address, or externals.<name>.address.`,
       );
     this.scope.live(root as Root, name, node, what);
-    return { ref: text };
+    return {
+      ref: [root, this.qualified(name), ...node.parts.slice(2)].join('.'),
+      ...(node.parts[2] === 'created' || this.scope.created?.(root as Root, name)
+        ? { requiresLive: true }
+        : {}),
+    };
   }
 }

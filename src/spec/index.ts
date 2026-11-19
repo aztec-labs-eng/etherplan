@@ -1,5 +1,6 @@
+import { validateModules } from './modules.ts';
 import { callTarget } from './call-target.ts';
-import { isAddress } from 'viem';
+import { isAddress, getContractAddress } from 'viem';
 import { assertDerivedSalt, assertSaltDerivation } from './salt.ts';
 import type { ContractId, DistributiveOmit, Hash, JsonValue, ResourceId } from '../types.ts';
 import type {
@@ -211,6 +212,24 @@ function validateReferences(spec: ParsedSpec): void {
   for (const item of spec.calls)
     candidates.push([`call:${item.id}`, [item.args, item.check, item.before]]);
 
+  const resourceIds = new Set([
+    ...spec.contracts.map((item) => `contract:${item.id}`),
+    ...spec.calls.map((item) => `call:${item.id}`),
+    ...Object.keys(spec.externals).map((name) => `external:${name}`),
+  ]);
+  for (const instance of spec.modules?.instances ?? []) {
+    for (const names of Object.values(instance.resources))
+      for (const id of Object.values(names))
+        assert(
+          resourceIds.has(id),
+          `Module ${instance.path.join('.')} maps missing resource ${id}.`,
+        );
+    for (const binding of [...Object.values(instance.inputs), ...Object.values(instance.outputs)]) {
+      candidates.push([`module:${instance.path.join('.')}`, [binding.value]]);
+      for (const id of binding.after)
+        assert(resourceIds.has(id), `Module readiness names missing resource ${id}.`);
+    }
+  }
   for (const [owner, values] of candidates) {
     for (const { reference, requiresLive } of referenceDetails(values, owner)) {
       const parts = reference.split('.');
@@ -229,11 +248,19 @@ function validateReferences(spec: ParsedSpec): void {
         );
         assert(externalIds.has(name), `Missing graph node external:${name} for ${owner}.`);
       } else if (root === 'contracts') {
+        const created = parts.length === 4 && parts[2] === 'created';
         assert(
-          parts.length === 3 && parts[2] === 'address' && name !== undefined,
+          ((parts.length === 3 && parts[2] === 'address') || created) && name !== undefined,
           `${owner} has invalid reference ${reference}.`,
         );
         assert(contractIds.has(name), `Missing graph node contract:${name} for ${owner}.`);
+        if (created)
+          assert(
+            spec.contracts
+              .find((item) => item.id === name)
+              ?.createdCode?.some((item) => item.getter === parts[3]),
+            `${owner} references undeclared pinned created result ${reference}.`,
+          );
       } else {
         throw new Error(`${owner} has unknown reference ${reference}.`);
       }
@@ -311,6 +338,7 @@ export function parseSpec(raw: unknown): ParsedSpec {
     spec,
     new Set([
       'schema',
+      'modules',
       'chainId',
       'values',
       'externals',
@@ -322,6 +350,7 @@ export function parseSpec(raw: unknown): ParsedSpec {
     ]),
     'Spec',
   );
+  if (spec.modules !== undefined) validateModules(spec.modules);
   assert(spec.schema === 1 || spec.schema === 2, 'Spec must have schema: 1 or 2.');
   assert(
     spec.dependencyMode === undefined ||
@@ -381,6 +410,7 @@ export function parseSpec(raw: unknown): ParsedSpec {
         'checks',
         'after',
         'codeHash',
+        'createdBy',
         'creationProofMode',
         'createdCode',
         'signerRole',
@@ -430,6 +460,16 @@ export function parseSpec(raw: unknown): ParsedSpec {
     if (item.checks !== undefined) assertChecks(item.checks, `${fullId} checks`);
     if (item.after !== undefined) assertAfter(item.after, `${fullId} after`);
     if (item.codeHash !== undefined) assertHash(item.codeHash, `${fullId} codeHash`);
+    if (item.createdBy !== undefined) {
+      assert(
+        typeof item.createdBy === 'string' && /^call:[a-z][a-zA-Z0-9_]*$/.test(item.createdBy),
+        `${fullId} createdBy must name a call.`,
+      );
+      assert(
+        item.address !== undefined && item.codeHash !== undefined,
+        `${fullId} createdBy requires an address and codeHash.`,
+      );
+    }
     assert(
       item.creationProofMode === undefined || item.creationProofMode === 'pinned-runtime',
       `${fullId} creationProofMode must be pinned-runtime.`,
@@ -684,7 +724,8 @@ export function graph(spec: ParsedSpec): OrderedNode[] {
         addEdge(resolution, dependency, `${location} needs ${reference}`);
         if (mode === 'compatibility')
           addEdge(execution, dependency, `compatibility reference ${reference}`);
-        else if (requiresLive) addEdge(execution, dependency, `requiresLive ${reference}`);
+        else if (requiresLive || reference.includes('.created.'))
+          addEdge(execution, dependency, `requiresLive ${reference}`);
         else if (root === 'externals' && node.kind !== 'external')
           addEdge(execution, dependency, `external verification ${reference}`);
       }
@@ -694,6 +735,8 @@ export function graph(spec: ParsedSpec): OrderedNode[] {
       addEdge(resolution, target, 'call target address');
       addEdge(execution, target, 'live call target');
     }
+    if (node.kind === 'contract' && node.item.createdBy)
+      addEdge(execution, node.item.createdBy, 'checked creator result');
     const after = node.kind === 'external' ? undefined : node.item.after;
     for (const dependency of after ?? []) addEdge(execution, dependency, 'explicit after');
     if (
@@ -823,7 +866,7 @@ export function resolve(
           (value.requiresLive === undefined || typeof value.requiresLive === 'boolean'),
         'A reference object needs ref and optional boolean requiresLive.',
       );
-      const [root, name, field] = value.ref.split('.');
+      const [root, name, field, getter] = value.ref.split('.');
       if (root === 'values' && field === undefined) {
         assert(name !== undefined && Object.hasOwn(spec.values, name), `Missing value ${name}.`);
         return cloneJson(spec.values[name]);
@@ -832,6 +875,14 @@ export function resolve(
         const external = name === undefined ? undefined : spec.externals[name];
         assert(external, `Missing external ${name}.`);
         return external.address;
+      }
+      if (root === 'contracts' && field === 'created') {
+        const parent = name === undefined ? undefined : addresses[name];
+        const child = spec.contracts
+          .find((item) => item.id === name)
+          ?.createdCode?.find((item) => item.getter === getter);
+        assert(parent && child, `Missing pinned created result ${value.ref}.`);
+        return getContractAddress({ from: parent, nonce: BigInt(child.createNonce) }).toLowerCase();
       }
       if (root === 'contracts' && field === 'address') {
         const address = name === undefined ? undefined : addresses[name];

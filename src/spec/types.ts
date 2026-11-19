@@ -1,4 +1,5 @@
 // Shapes of a parsed specification and its dependency graph. Source of truth: parseSpec and graph in index.ts.
+import type { ProjectModules } from './modules.ts';
 import type {
   Abi,
   Address,
@@ -58,6 +59,7 @@ export interface SpecContract {
   checks?: SpecChecks;
   after?: ResourceId[];
   codeHash?: Hash;
+  createdBy?: CallId;
   creationProofMode?: 'pinned-runtime';
   createdCode?: SpecCreatedCode[];
   /** Matches `/^[a-z][a-z0-9_-]*$/`; the scheduler has lanes only for `deployer` and `owner`. */
@@ -125,6 +127,7 @@ export interface ExecutionAssumption {
 
 export interface ParsedSpec {
   schema: SchemaVersion;
+  modules?: ProjectModules;
   chainId: number;
   dependencyMode?: DependencyMode;
   executionAssumptions?: ExecutionAssumption[];

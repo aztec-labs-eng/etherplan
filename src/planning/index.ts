@@ -87,6 +87,7 @@ function planResource(
   copyDefined(result, resource, ['resolutionDependencies', 'executionEdges']);
   if (resource.kind === 'contract') {
     copyDefined(result, resource, [
+      'createdBy',
       'artifactHash',
       'initcodeHash',
       'inputsHash',
@@ -133,8 +134,11 @@ function decide(
   observation: VerificationResult,
   plannedById: Map<ResourceId, PlannedResource>,
 ): PlanAction {
-  if (resource.kind === 'contract' && observation.codeComparison?.mode === 'absent')
+  if (resource.kind === 'contract' && observation.codeComparison?.mode === 'absent') {
+    if (resource.createdBy && plannedById.get(resource.createdBy)?.action === 'call')
+      return 'verify';
     return resource.initcode === undefined ? 'conflict' : 'deploy';
+  }
   if (resource.kind === 'call') {
     const state = bindingState(observation);
     if (state === 'after') return 'reuse';
@@ -142,7 +146,7 @@ function decide(
     if (
       state === 'read-failed' &&
       observation.bindingChecks?.[0]?.targetAbsent === true &&
-      plannedById.get(resource.targetId)?.action === 'deploy'
+      ['deploy', 'verify'].includes(plannedById.get(resource.targetId)?.action ?? '')
     )
       return 'call';
     if (state === 'other' || state === 'read-failed') return 'conflict';
@@ -365,6 +369,16 @@ export async function createPlan({
     'Plan needs a read-only chain client.',
   );
   const spec = parseSpec(specInput);
+  if (spec.modules || state?.moduleRoot) {
+    const owned = new Set(spec.contracts.map((item) => `contract:${item.id}`));
+    const omitted = Object.keys(state?.resources ?? {}).filter(
+      (id) => id.startsWith('contract:') && !owned.has(id),
+    );
+    assert(
+      omitted.length === 0,
+      `Module root omitted owned contracts: ${omitted.join(', ')}. Use the complete root; ownership removal is not supported.`,
+    );
+  }
   const described = usesDependencyPlan(spec);
   const ordered = graph(spec);
   const { resources } = prepareResources(spec, ordered, artifacts);
@@ -472,6 +486,19 @@ export async function createPlan({
         ],
       };
     }
+    if (
+      (spec.modules || state?.moduleRoot) &&
+      action === 'reuse' &&
+      state?.resources[resource.id]
+    ) {
+      const unmet = resource.dependencies.filter((id) =>
+        ['deploy', 'call', 'verify'].includes(plannedById.get(id)?.action ?? ''),
+      );
+      assert(
+        unmet.length === 0,
+        `Completed ${resource.id} cannot acquire unmet readiness prerequisites: ${unmet.join(', ')}. Its prior execution does not prove this ordering.`,
+      );
+    }
     const unsafeDependencies = resource.dependencies.filter((dependency) => {
       const planned = plannedById.get(dependency)?.action;
       return planned === 'conflict' || planned === 'unverified';
@@ -510,6 +537,7 @@ export async function createPlan({
       .map((resource): [ContractId, Hash] => [resource.id, resource.artifactHash]),
   );
   const base = {
+    ...(spec.modules ? { modules: spec.modules } : {}),
     chain,
     observed: { blockNumber: observed.number.toString(), blockHash: observed.hash },
     stateHash: hashJson(state),

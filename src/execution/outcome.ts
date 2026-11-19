@@ -676,9 +676,14 @@ export function assertRecoveryEvidence(ctx: ApplyContext): void {
   }
 }
 
-export async function recheckReused(ctx: ApplyContext): Promise<void> {
+export async function recheckReused(
+  ctx: ApplyContext,
+  verifications?: ResourceId[],
+): Promise<void> {
   for (const item of ctx.prepared.values()) {
-    if (item.planned.action !== 'reuse') continue;
+    if (verifications ? !verifications.includes(item.planned.id) : item.planned.action !== 'reuse')
+      continue;
+    if (verifications) await checkExecutionDependencies(ctx, [{ item }]);
     const verification = await verifyCurrent(ctx, item);
     if (verification.status !== 'verified') {
       throw new ApplyError(

@@ -1,5 +1,6 @@
 // Prepared resources and the saved plan. Source of truth: prepareResources and transactionFor in resources.ts;
 // planResource, decide, compareState, artifactDrift, and createPlan in index.ts.
+import type { ProjectModules } from '../spec/modules.ts';
 import type { Artifacts, NormalizedArtifact } from '../artifacts/types.ts';
 import type { ScheduleWave } from '../scheduling/types.ts';
 import type {
@@ -74,6 +75,7 @@ export interface PreparedExternal extends PreparedBase {
 }
 
 export interface PreparedContract extends PreparedBase {
+  createdBy?: `call:${string}`;
   id: ContractId;
   kind: 'contract';
   artifact: NormalizedArtifact;
@@ -139,7 +141,7 @@ export interface PlannedTransaction {
   value: DecimalString;
 }
 
-export type PlanAction = 'reuse' | 'deploy' | 'call' | 'conflict' | 'unverified';
+export type PlanAction = 'verify' | 'reuse' | 'deploy' | 'call' | 'conflict' | 'unverified';
 
 /** Why a plan accepts a rebuilt artifact for an unchanged CREATE2 deployment, or why it does not. */
 export interface ArtifactDrift {
@@ -208,6 +210,7 @@ interface PlannedBase {
 }
 
 export interface PlannedContract extends PlannedBase {
+  createdBy?: `call:${string}`;
   kind: 'contract';
   artifactHash: Hash;
   initcodeHash?: Hash;
@@ -261,6 +264,7 @@ export interface PlanPipeline extends PlanSigners {
 }
 
 interface PlanBase {
+  modules?: ProjectModules;
   chain: ChainIdentity;
   observed: { blockNumber: DecimalString; blockHash: Hash };
   /** Hash of the state the plan was created against (`hashJson(null)` when there was none). */

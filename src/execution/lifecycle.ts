@@ -112,7 +112,13 @@ async function persist(ctx: ApplyContext): Promise<StateWriteResult> {
     throw new ApplyError('stale-state', 'Verified resources did not produce a state file.');
   await assertCanonicalSnapshot(ctx, snapshot);
   await ctx.lock.assertHeld?.();
-  await ctx.writeState(current.version, { ...state, lastPlanHash: ctx.plan.planHash });
+  await ctx.writeState(current.version, {
+    ...state,
+    ...(ctx.deps.parseSpec(ctx.spec).modules || state.moduleRoot
+      ? { moduleRoot: true as const, journalSequence: ctx.journal.records.length }
+      : {}),
+    lastPlanHash: ctx.plan.planHash,
+  });
   return { file: ctx.stateFile, written: true, resources: verified.length };
 }
 
@@ -245,6 +251,7 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
   }
   for (const wave of ctx.schedule.waves) {
     await revalidateVerified(ctx);
+    if (wave.verifications) await recheckReused(ctx, wave.verifications);
     if (ctx.pipeline && (await resumePipelineWave(ctx, wave))) {
       continue;
     }

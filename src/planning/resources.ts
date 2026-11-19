@@ -153,6 +153,7 @@ function buildContract(
   if (Object.keys(libraries).length > 0) resource.libraries = libraries;
   if (item.codeHash !== undefined) resource.expectedCodeHash = item.codeHash;
   if (item.ignoreMetadata) resource.ignoreMetadata = true;
+  if (item.createdBy) resource.createdBy = item.createdBy;
   if (item.creationProofMode === 'pinned-runtime') {
     resource.creationProofMode = item.creationProofMode;
     resource.createdCode = item.createdCode!.map((child) => ({
@@ -280,6 +281,16 @@ export function prepareResources(
     }
   }
 
+  for (const resource of resources) {
+    if (resource.kind !== 'contract' || !resource.createdBy) continue;
+    const creator = resources.find((item) => item.id === resource.createdBy);
+    assert(
+      creator?.kind === 'call' &&
+        creator.before.absent === true &&
+        creator.after.address?.toLowerCase() === resource.address.toLowerCase(),
+      `${resource.id} createdBy needs a creator call with before_absent and a checked result at the same address.`,
+    );
+  }
   validateResources(resources);
   return { resources, addresses };
 }

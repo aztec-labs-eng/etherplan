@@ -9,6 +9,7 @@ Read the topics as needed:
 3. [HCL syntax](syntax-and-resources.md) and [resource types](resources.md): accepted forms and fields.
 4. [One project for several chains](multi-chain.md): choose local contracts or external addresses.
 5. [Conditions](conditions.md): locals and `enabled`.
-6. [Workspaces](workspaces.md) and [configuration](configuration.md): separate state and set CLI defaults.
+6. [Local modules](modules.md): typed instances and outputs in one complete root.
+7. [Workspaces](workspaces.md) and [configuration](configuration.md): separate state and set CLI defaults.
 
 If you generate specs directly, use [JSON spec shape](json-spec.md). For address and execution ordering, use [Dependencies](../dependencies/index.md). Once the project validates, [create a plan](../deploy/validate-and-plan.md).
