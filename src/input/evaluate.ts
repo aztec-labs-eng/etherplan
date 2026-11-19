@@ -24,7 +24,7 @@ const HEX = /^0x[0-9a-fA-F]*$/;
 export interface NameScope {
   moduleOutput?(module: string, output: string, node: Located): void;
   /** Throws if `var.<name>` has no declaration or value. `what` names the attribute. */
-  variable(name: string, node: Located, what: string): void;
+  variable(name: string, node: HclReference, what: string): void;
   locals: ReadonlyMap<string, HclAttribute>;
   declared(root: Root, name: string): boolean;
 }
@@ -54,6 +54,33 @@ export function describeValue(value: JsonValue): string {
   return value === null
     ? 'null'
     : `${kind(value)} ${text.length > 60 ? `${text.slice(0, 57)}...` : text}`;
+}
+
+/** Constant record traversal, shared by root variables and child input bindings. */
+export function readFields(
+  value: JsonValue,
+  fields: string[],
+  node: HclReference,
+  what?: string,
+): JsonValue {
+  const path = node.parts.join('.');
+  if (hasReference(value))
+    fail(node, `Field read ${path} needs a constant record without resource references.`);
+  for (const field of fields) {
+    if (value === null) return null;
+    if (typeof value !== 'object' || Array.isArray(value))
+      fail(
+        node,
+        `${what ? `${what} has unsupported reference ${path}. ` : ''}Cannot read ${path}: field ${field} needs a record; found ${describeValue(value)}.`,
+      );
+    if (!Object.hasOwn(value, field))
+      fail(
+        node,
+        `Cannot read ${path}: missing field ${field}. Available fields: ${Object.keys(value).sort().join(', ') || '(none)'}.`,
+      );
+    value = value[field]!;
+  }
+  return structuredClone(value);
 }
 
 // Hex strings compare without regard to case, as addresses and hashes do on chain.
@@ -172,7 +199,7 @@ export function checkReferences(
     );
   if (name === undefined) unsupported();
   if (root === 'var' || root === 'local') {
-    if (node.parts.length !== 2) unsupported();
+    if (root === 'local' && node.parts.length !== 2) unsupported();
     if (root === 'var') scope.variable(name, node, what);
     else if (!scope.locals.has(name))
       fail(node, `${what} uses undefined local.${name}. Define it in a locals block.`);
@@ -225,7 +252,14 @@ export class Evaluator {
     const [root, name, output] = node.parts;
     let binding: ModuleBinding | undefined;
     if (root === 'module' && name && output) binding = this.scope.module.output(name, output, this);
-    else if (root === 'var' && name) binding = this.scope.module.bindings.get(name);
+    else if (root === 'var' && name) {
+      binding = this.scope.module.bindings.get(name);
+      if (binding && node.parts.length > 2) {
+        if (hasReference(binding.value))
+          fail(node, `Field read ${node.parts.join('.')} needs a constant record module input.`);
+        binding = { ...binding, value: readFields(binding.value, node.parts.slice(2), node) };
+      }
+    }
     if (binding) for (const id of binding.after) this.readiness.add(id);
     return binding;
   }
@@ -454,6 +488,7 @@ export class Evaluator {
     if (root === 'var') {
       // A null variable is inlined even in a value field, so an attribute set to it is left unset.
       const value = this.scope.variables.get(name)!;
+      if (node.parts.length > 2) return readFields(value, node.parts.slice(2), node);
       if (mode !== 'value' || value === null || this.scope.module?.child)
         return structuredClone(value);
       this.referenced.add(name);

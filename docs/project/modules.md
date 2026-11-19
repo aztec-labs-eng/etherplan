@@ -20,6 +20,8 @@ module "consumer" {
 
 Each source directory has `main.ethp`. All `.ethp` files in that directory form the module. Declare inputs with ordinary `variable` blocks, including their types and defaults. A child inherits the root chain and CREATE2 factory. It cannot select a workspace, load variable overlays, or supply backend configuration. Only the root reads environment inputs and CLI flags. Artifact paths are relative to their defining source.
 
+An input of type `any` can receive a constant record, for example `config = var.dai`. Inside the module, use `var.config.rate` or deeper field paths. These reads fold to constants in both value fields and constant fields such as `salt` and `code_hash`. Missing fields are errors; reading through `null` gives `null`.
+
 Export values with `output` blocks:
 
 ```hcl

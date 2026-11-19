@@ -1,0 +1,14 @@
+variable "mixer" { type = string }
+mixer = var.mixer
+
+resource "contract" "token" {
+  artifact = "Minimal.json"
+  salt = derive
+  args = []
+  sender_independent = true
+}
+
+output "ready" {
+  value = contracts.token.address
+  after = [contracts.token]
+}

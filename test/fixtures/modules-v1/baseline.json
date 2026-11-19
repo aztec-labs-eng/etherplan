@@ -1,0 +1,503 @@
+{
+  "baseline": "d38f366881f1e1fdc1c3d35a5242825ec895bf93",
+  "spec": {
+    "schema": 2,
+    "chainId": 31337,
+    "values": {},
+    "externals": {},
+    "factory": {
+      "address": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+      "codeHash": "0x309c67890bde4c575dc23d2cc3b5c3a3d599e312e980e9b61b5bc8f3cd87c8bb"
+    },
+    "contracts": [
+      {
+        "id": "consumer",
+        "artifact": "Minimal.json",
+        "salt": "0xdf256b984a0e544ea38794a68c145c6c5513b7af29072dd1d0dbc4408cbc156f",
+        "saltDerivation": {
+          "mixer": "legacy/root"
+        },
+        "args": [],
+        "after": [
+          "contract:module1_5_outer_token",
+          "contract:module2_5_outer_6_nested_token"
+        ],
+        "senderIndependent": true
+      },
+      {
+        "id": "module1_5_outer_token",
+        "artifact": "outer/Minimal.json",
+        "salt": "0x268d0fd89539a036de063839c5fdf53d5f9dbef7ef1b939dc38fdc50c446d215",
+        "saltDerivation": {
+          "mixer": "legacy/outer"
+        },
+        "args": [],
+        "senderIndependent": true
+      },
+      {
+        "id": "module2_5_outer_6_nested_token",
+        "artifact": "leaf/Minimal.json",
+        "salt": "0x880f7932f3064b6af0f02b816b8d91903e60685a350fcee171d174509406b6e6",
+        "saltDerivation": {
+          "mixer": "legacy/leaf"
+        },
+        "args": [],
+        "senderIndependent": true
+      }
+    ],
+    "calls": [],
+    "modules": {
+      "version": 1,
+      "instances": [
+        {
+          "path": [
+            "outer",
+            "nested"
+          ],
+          "resources": {
+            "contract": {
+              "token": "contract:module2_5_outer_6_nested_token"
+            },
+            "external": {},
+            "call": {}
+          },
+          "inputs": {
+            "mixer": {
+              "value": "legacy/leaf",
+              "after": []
+            }
+          },
+          "outputs": {
+            "ready": {
+              "value": {
+                "ref": "contracts.module2_5_outer_6_nested_token.address"
+              },
+              "after": [
+                "contract:module2_5_outer_6_nested_token"
+              ]
+            }
+          }
+        },
+        {
+          "path": [
+            "outer"
+          ],
+          "resources": {
+            "contract": {
+              "token": "contract:module1_5_outer_token"
+            },
+            "external": {},
+            "call": {}
+          },
+          "inputs": {
+            "mixer": {
+              "value": "legacy/outer",
+              "after": []
+            }
+          },
+          "outputs": {
+            "ready": {
+              "value": {
+                "ref": "contracts.module1_5_outer_token.address"
+              },
+              "after": [
+                "contract:module2_5_outer_6_nested_token"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  "plan": {
+    "formatVersion": 2,
+    "modules": {
+      "version": 1,
+      "instances": [
+        {
+          "path": [
+            "outer",
+            "nested"
+          ],
+          "resources": {
+            "contract": {
+              "token": "contract:module2_5_outer_6_nested_token"
+            },
+            "external": {},
+            "call": {}
+          },
+          "inputs": {
+            "mixer": {
+              "value": "legacy/leaf",
+              "after": []
+            }
+          },
+          "outputs": {
+            "ready": {
+              "value": {
+                "ref": "contracts.module2_5_outer_6_nested_token.address"
+              },
+              "after": [
+                "contract:module2_5_outer_6_nested_token"
+              ]
+            }
+          }
+        },
+        {
+          "path": [
+            "outer"
+          ],
+          "resources": {
+            "contract": {
+              "token": "contract:module1_5_outer_token"
+            },
+            "external": {},
+            "call": {}
+          },
+          "inputs": {
+            "mixer": {
+              "value": "legacy/outer",
+              "after": []
+            }
+          },
+          "outputs": {
+            "ready": {
+              "value": {
+                "ref": "contracts.module1_5_outer_token.address"
+              },
+              "after": [
+                "contract:module2_5_outer_6_nested_token"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "chain": {
+      "id": 31337,
+      "genesisHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "observed": {
+      "blockNumber": "7",
+      "blockHash": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    "stateHash": "0xefbde2c3aee204a69b7696d4b10ff31137fe78e3946306284f806e2dfc68b805",
+    "specHash": "0xfa4e89e5e1584ccdb9f7f507b64439a0d33de8c33b88ba22735876ad54045e11",
+    "artifactHashes": {
+      "contract:consumer": "0xa882f11404689dd1f5c2d563500e490cf62db39653b23317122124215e3dc5f2",
+      "contract:module1_5_outer_token": "0xa882f11404689dd1f5c2d563500e490cf62db39653b23317122124215e3dc5f2",
+      "contract:module2_5_outer_6_nested_token": "0xa882f11404689dd1f5c2d563500e490cf62db39653b23317122124215e3dc5f2"
+    },
+    "resources": [
+      {
+        "id": "contract:consumer",
+        "kind": "contract",
+        "dependencies": [
+          "contract:module1_5_outer_token",
+          "contract:module2_5_outer_6_nested_token"
+        ],
+        "address": "0xeceb95d16504ee32643f3cb4bc5a98c1d26f4e78",
+        "resolutionDependencies": [],
+        "executionEdges": [
+          {
+            "id": "contract:module1_5_outer_token",
+            "reasons": [
+              "explicit after"
+            ]
+          },
+          {
+            "id": "contract:module2_5_outer_6_nested_token",
+            "reasons": [
+              "explicit after"
+            ]
+          }
+        ],
+        "artifactHash": "0xa882f11404689dd1f5c2d563500e490cf62db39653b23317122124215e3dc5f2",
+        "initcodeHash": "0x80bef3d7bb3779e9f8d1d4c2d106a7696d12de93a130a673a3178c65958c13f5",
+        "inputsHash": "0x518674ab2b227e5f11e9084f615d57663cde47bce1ba168b4c19c7ee22a73d70",
+        "salt": "0xdf256b984a0e544ea38794a68c145c6c5513b7af29072dd1d0dbc4408cbc156f",
+        "saltDerivation": {
+          "mixer": "legacy/root"
+        },
+        "factory": {
+          "address": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+          "codeHash": "0x309c67890bde4c575dc23d2cc3b5c3a3d599e312e980e9b61b5bc8f3cd87c8bb"
+        },
+        "checks": [],
+        "signerRole": "deployer",
+        "senderIndependent": true,
+        "action": "conflict",
+        "observation": {
+          "id": "contract:consumer",
+          "address": "0xeceb95d16504ee32643f3cb4bc5a98c1d26f4e78",
+          "codeHash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+          "codeComparison": {
+            "mode": "exact",
+            "matched": true
+          },
+          "proofs": [
+            {
+              "name": "runtime",
+              "method": "artifact-runtime",
+              "expected": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+              "actual": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+              "matched": true
+            }
+          ],
+          "missingProofs": [
+            "The CREATE2 address has code but no verified creation transaction or explicit import. Resume its deployment or import it deliberately."
+          ],
+          "bindingChecks": [],
+          "reasons": [],
+          "status": "unverified",
+          "evidence": {
+            "expectedSkeletonHash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+            "liveSkeletonHash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+            "immutables": []
+          },
+          "dependencyConflicts": [
+            "contract:module1_5_outer_token",
+            "contract:module2_5_outer_6_nested_token"
+          ]
+        }
+      },
+      {
+        "id": "contract:module1_5_outer_token",
+        "kind": "contract",
+        "dependencies": [],
+        "address": "0x670d66d0eaf7f13b07051ef380513071751fc63f",
+        "resolutionDependencies": [],
+        "executionEdges": [],
+        "artifactHash": "0xa882f11404689dd1f5c2d563500e490cf62db39653b23317122124215e3dc5f2",
+        "initcodeHash": "0x80bef3d7bb3779e9f8d1d4c2d106a7696d12de93a130a673a3178c65958c13f5",
+        "inputsHash": "0x518674ab2b227e5f11e9084f615d57663cde47bce1ba168b4c19c7ee22a73d70",
+        "salt": "0x268d0fd89539a036de063839c5fdf53d5f9dbef7ef1b939dc38fdc50c446d215",
+        "saltDerivation": {
+          "mixer": "legacy/outer"
+        },
+        "factory": {
+          "address": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+          "codeHash": "0x309c67890bde4c575dc23d2cc3b5c3a3d599e312e980e9b61b5bc8f3cd87c8bb"
+        },
+        "checks": [],
+        "signerRole": "deployer",
+        "senderIndependent": true,
+        "action": "unverified",
+        "observation": {
+          "id": "contract:module1_5_outer_token",
+          "address": "0x670d66d0eaf7f13b07051ef380513071751fc63f",
+          "codeHash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+          "codeComparison": {
+            "mode": "exact",
+            "matched": true
+          },
+          "proofs": [
+            {
+              "name": "runtime",
+              "method": "artifact-runtime",
+              "expected": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+              "actual": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+              "matched": true
+            }
+          ],
+          "missingProofs": [
+            "The CREATE2 address has code but no verified creation transaction or explicit import. Resume its deployment or import it deliberately."
+          ],
+          "bindingChecks": [],
+          "reasons": [],
+          "status": "unverified",
+          "evidence": {
+            "expectedSkeletonHash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+            "liveSkeletonHash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+            "immutables": []
+          }
+        }
+      },
+      {
+        "id": "contract:module2_5_outer_6_nested_token",
+        "kind": "contract",
+        "dependencies": [],
+        "address": "0x7a24f2cfa46dee9c119f2efbf3b64d05dbbb4145",
+        "resolutionDependencies": [],
+        "executionEdges": [],
+        "artifactHash": "0xa882f11404689dd1f5c2d563500e490cf62db39653b23317122124215e3dc5f2",
+        "initcodeHash": "0x80bef3d7bb3779e9f8d1d4c2d106a7696d12de93a130a673a3178c65958c13f5",
+        "inputsHash": "0x518674ab2b227e5f11e9084f615d57663cde47bce1ba168b4c19c7ee22a73d70",
+        "salt": "0x880f7932f3064b6af0f02b816b8d91903e60685a350fcee171d174509406b6e6",
+        "saltDerivation": {
+          "mixer": "legacy/leaf"
+        },
+        "factory": {
+          "address": "0x4e59b44847b379578588920cA78FbF26c0B4956C",
+          "codeHash": "0x309c67890bde4c575dc23d2cc3b5c3a3d599e312e980e9b61b5bc8f3cd87c8bb"
+        },
+        "checks": [],
+        "signerRole": "deployer",
+        "senderIndependent": true,
+        "action": "unverified",
+        "observation": {
+          "id": "contract:module2_5_outer_6_nested_token",
+          "address": "0x7a24f2cfa46dee9c119f2efbf3b64d05dbbb4145",
+          "codeHash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+          "codeComparison": {
+            "mode": "exact",
+            "matched": true
+          },
+          "proofs": [
+            {
+              "name": "runtime",
+              "method": "artifact-runtime",
+              "expected": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+              "actual": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+              "matched": true
+            }
+          ],
+          "missingProofs": [
+            "The CREATE2 address has code but no verified creation transaction or explicit import. Resume its deployment or import it deliberately."
+          ],
+          "bindingChecks": [],
+          "reasons": [],
+          "status": "unverified",
+          "evidence": {
+            "expectedSkeletonHash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+            "liveSkeletonHash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+            "immutables": []
+          }
+        }
+      }
+    ],
+    "dependencyMode": "split",
+    "graphs": {
+      "resolution": [
+        {
+          "id": "contract:consumer",
+          "needs": []
+        },
+        {
+          "id": "contract:module1_5_outer_token",
+          "needs": []
+        },
+        {
+          "id": "contract:module2_5_outer_6_nested_token",
+          "needs": []
+        }
+      ],
+      "execution": [
+        {
+          "id": "contract:consumer",
+          "after": [
+            {
+              "id": "contract:module1_5_outer_token",
+              "reasons": [
+                "explicit after"
+              ]
+            },
+            {
+              "id": "contract:module2_5_outer_6_nested_token",
+              "reasons": [
+                "explicit after"
+              ]
+            }
+          ]
+        },
+        {
+          "id": "contract:module1_5_outer_token",
+          "after": []
+        },
+        {
+          "id": "contract:module2_5_outer_6_nested_token",
+          "after": []
+        }
+      ]
+    },
+    "executionWaves": {
+      "waves": [],
+      "deferred": []
+    },
+    "executionAssumptions": [],
+    "warnings": [],
+    "planHash": "0xeda7ca2b4933d7e8a1ea642a2baa0f1da43da8ddbd4d8413f3d472ab336fd72a"
+  },
+  "state": {
+    "formatVersion": 1,
+    "chain": {
+      "id": 31337,
+      "genesisHash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "resources": {
+      "contract:consumer": {
+        "address": "0xeceb95d16504ee32643f3cb4bc5a98c1d26f4e78",
+        "priorAddress": null,
+        "artifactHash": "0xa882f11404689dd1f5c2d563500e490cf62db39653b23317122124215e3dc5f2",
+        "initcodeHash": "0x80bef3d7bb3779e9f8d1d4c2d106a7696d12de93a130a673a3178c65958c13f5",
+        "inputs": [],
+        "inputsHash": "0x518674ab2b227e5f11e9084f615d57663cde47bce1ba168b4c19c7ee22a73d70",
+        "priorInputs": null,
+        "priorInputsHash": null,
+        "salt": "0xdf256b984a0e544ea38794a68c145c6c5513b7af29072dd1d0dbc4408cbc156f",
+        "codeHash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+        "priorCodeHash": null,
+        "proofHash": "0xe7dd0066b31d358956528e80b5a4b9d08b13fb1f963ad0b919fe0a2628d80f57",
+        "priorProofHash": null,
+        "transactions": [],
+        "provenance": {
+          "kind": "import",
+          "creationTransactionHash": null
+        },
+        "sourceHash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "saltDerivation": {
+          "mixer": "legacy/root"
+        }
+      },
+      "contract:module1_5_outer_token": {
+        "address": "0x670d66d0eaf7f13b07051ef380513071751fc63f",
+        "priorAddress": null,
+        "artifactHash": "0xa882f11404689dd1f5c2d563500e490cf62db39653b23317122124215e3dc5f2",
+        "initcodeHash": "0x80bef3d7bb3779e9f8d1d4c2d106a7696d12de93a130a673a3178c65958c13f5",
+        "inputs": [],
+        "inputsHash": "0x518674ab2b227e5f11e9084f615d57663cde47bce1ba168b4c19c7ee22a73d70",
+        "priorInputs": null,
+        "priorInputsHash": null,
+        "salt": "0x268d0fd89539a036de063839c5fdf53d5f9dbef7ef1b939dc38fdc50c446d215",
+        "codeHash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+        "priorCodeHash": null,
+        "proofHash": "0x37c5294070c7640fb1dde82f9beb72ae60dc746c59eb3000f4fa989a13de7fb8",
+        "priorProofHash": null,
+        "transactions": [],
+        "provenance": {
+          "kind": "import",
+          "creationTransactionHash": null
+        },
+        "sourceHash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "saltDerivation": {
+          "mixer": "legacy/outer"
+        }
+      },
+      "contract:module2_5_outer_6_nested_token": {
+        "address": "0x7a24f2cfa46dee9c119f2efbf3b64d05dbbb4145",
+        "priorAddress": null,
+        "artifactHash": "0xa882f11404689dd1f5c2d563500e490cf62db39653b23317122124215e3dc5f2",
+        "initcodeHash": "0x80bef3d7bb3779e9f8d1d4c2d106a7696d12de93a130a673a3178c65958c13f5",
+        "inputs": [],
+        "inputsHash": "0x518674ab2b227e5f11e9084f615d57663cde47bce1ba168b4c19c7ee22a73d70",
+        "priorInputs": null,
+        "priorInputsHash": null,
+        "salt": "0x880f7932f3064b6af0f02b816b8d91903e60685a350fcee171d174509406b6e6",
+        "codeHash": "0x07ad118d6cc8642c86c03827f276d8b791a65e5c99a3845faf186be720a1455d",
+        "priorCodeHash": null,
+        "proofHash": "0x791dcb6303158533d7035864b91cd46308a9370b419c9c32c768aa0d590ce55f",
+        "priorProofHash": null,
+        "transactions": [],
+        "provenance": {
+          "kind": "import",
+          "creationTransactionHash": null
+        },
+        "sourceHash": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "saltDerivation": {
+          "mixer": "legacy/leaf"
+        }
+      }
+    },
+    "moduleRoot": true
+  }
+}

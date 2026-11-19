@@ -10,6 +10,7 @@ import {
   checkReferences,
   describeValue,
   literal,
+  readFields,
 } from './evaluate.ts';
 import { assertNotSecret, declareVariables, resolveVariables } from './variables.ts';
 import { MIXER, MIXER_HINT, deriveSalt } from '../spec/salt.ts';
@@ -520,6 +521,8 @@ export function compileProject(
         node,
         `${what} uses undeclared variable ${name}. Declare it with variable "${name}" {}.`,
       );
+      if (node.parts.length > 2)
+        readFields(variables.get(name)!.value, node.parts.slice(2), node, what);
     },
     locals,
     declared: (root, name) => names[root].has(name),
