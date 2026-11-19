@@ -316,13 +316,45 @@ export async function stableReceipt(
   }
 }
 
+async function reopenVerified(ctx: ApplyContext): Promise<void> {
+  for (const item of ctx.prepared.values()) {
+    const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
+    const latest = records.at(-1);
+    if (latest?.phase !== 'verified') continue;
+    const hash = latest.transactionHash ?? latest.revertedTransaction;
+    if (!hash) continue;
+    const signed = records
+      .filter(
+        (record): record is SignedRecord =>
+          record.phase === 'signed' && record.transactionHash.toLowerCase() === hash.toLowerCase(),
+      )
+      .at(-1);
+    if (!signed)
+      throw new ApplyError(
+        'journal',
+        `Reorganized action ${item.planned.id} has no signed bytes.`,
+        { actionId: item.planned.id },
+      );
+    // Reopen this action for its saved-signature recovery path. Never allocate another nonce here.
+    await append(ctx, item.planned.id, {
+      phase: 'broadcast-attempt',
+      reorgRecovery: true,
+      signer: signed.signer,
+      nonce: signed.nonce,
+      transactionHash: signed.transactionHash,
+      rebroadcast: true,
+      ...(signed.reservationId ? { reservationId: signed.reservationId } : {}),
+    });
+    ctx.outcomes.delete(item.planned.id);
+  }
+}
+
 export async function revalidateVerified(
   ctx: ApplyContext,
   wait = false,
   confirmations = 1,
 ): Promise<void> {
   const retry = receiptRetryOptions(ctx.config);
-  let reorg: ApplyError | undefined;
   for (const item of ctx.prepared.values()) {
     const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
     const latest = records.at(-1);
@@ -343,34 +375,10 @@ export async function revalidateVerified(
       await stableReceipt(ctx, hash, receipt, item.planned.id, wait, retry, confirmations);
     } catch (error) {
       if (!(error instanceof ApplyError) || error.code !== 'reorg') throw error;
-      const signed = records
-        .filter(
-          (record): record is SignedRecord =>
-            record.phase === 'signed' &&
-            record.transactionHash.toLowerCase() === hash.toLowerCase(),
-        )
-        .at(-1);
-      if (!signed)
-        throw new ApplyError(
-          'journal',
-          `Reorganized action ${item.planned.id} has no signed bytes.`,
-          { actionId: item.planned.id },
-        );
-      // Reopen this action for its saved-signature recovery path. Never allocate another nonce here.
-      await append(ctx, item.planned.id, {
-        phase: 'broadcast-attempt',
-        reorgRecovery: true,
-        signer: signed.signer,
-        nonce: signed.nonce,
-        transactionHash: signed.transactionHash,
-        rebroadcast: true,
-        ...(signed.reservationId ? { reservationId: signed.reservationId } : {}),
-      });
-      ctx.outcomes.delete(item.planned.id);
-      reorg ??= error;
+      await reopenVerified(ctx);
+      throw error;
     }
   }
-  if (reorg) throw reorg;
 }
 
 /** Read every completed resource at one canonical block before persisting or reporting success. */
