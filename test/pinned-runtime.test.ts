@@ -169,6 +169,87 @@ test('pinned runtime verifies a fresh constructor-created child and revalidates 
   }
 });
 
+test('journal-only pinned recovery applies after a failed state commit without signing again', async () => {
+  const ws = await fixture();
+  try {
+    ws.spec.contracts[0].creationProofMode = 'pinned-runtime';
+    ws.spec.contracts[0].codeHash = ws.parentHash;
+    ws.spec.contracts[0].createdCode = [
+      { getter: 'implementation', createNonce: 1, codeHash: ws.childHash },
+    ];
+    const scope = {
+      project: 'test',
+      environment: 'dev',
+      label: 'pinned-recovery',
+      chainId: 31337,
+      genesisHash: (await ws.chain.client.getBlock({ blockNumber: 0n })).hash,
+    };
+    const backend = memoryBackend(scope);
+    const save = backend.stateStore.compareAndSwap;
+    backend.stateStore.compareAndSwap = async () => {
+      throw new Error('simulated state commit outage');
+    };
+    const apply = (plan) =>
+      applyPlan({
+        plan,
+        spec: ws.spec,
+        artifacts: ws.artifacts,
+        client: ws.chain.client,
+        signers: { deployer: [deployerA] },
+        ...backend,
+        scope,
+        confirmations: 1,
+        pollIntervalMs: 20,
+      });
+    await assert.rejects(apply(await createPlan(ws.input)), /simulated state commit outage/);
+    backend.stateStore.compareAndSwap = save;
+    assert.equal(await backend.stateStore.read(scope), null);
+    const records = await readStoredJournal(backend.journalStore, scope);
+    const signatures = records.filter((record) => record.phase === 'signed').length;
+    const recovered = await createPlan({ ...ws.input, journalRecords: records });
+    assert.equal(recovered.resources[0].action, 'reuse');
+    const journalProof = records.find((record) => record.phase === 'verified').creationProof;
+    assert.notEqual(
+      journalProof.factory.address,
+      recovered.resources[0].observation.creationProof.factory.address,
+    );
+    assert.equal(
+      journalProof.factory.address.toLowerCase(),
+      recovered.resources[0].observation.creationProof.factory.address.toLowerCase(),
+    );
+    for (const change of [
+      (proof) => {
+        proof.factory.address = `0x${'11'.repeat(20)}`;
+      },
+      (proof) => {
+        proof.createdCode[0].getter = 'Implementation';
+      },
+      (proof) => {
+        proof.createdCode[0].codeHash = `0x${'11'.repeat(32)}`;
+      },
+    ]) {
+      const altered = structuredClone(recovered);
+      altered.resources[0].observation.creationProof = structuredClone(
+        altered.resources[0].observation.creationProof,
+      );
+      change(altered.resources[0].observation.creationProof);
+      const { planHash: _hash, ...fields } = altered;
+      altered.planHash = hashJson(fields);
+      await assert.rejects(apply(altered), (error: { code?: string }) => error.code === 'journal');
+    }
+    const result = await apply(recovered);
+    assert.equal(result.status, 'applied');
+    assert.equal(result.transactionsSigned, 0);
+    const after = await readStoredJournal(backend.journalStore, scope);
+    assert.equal(after.filter((record) => record.phase === 'signed').length, signatures);
+    assert.ok(
+      (await backend.stateStore.read(scope)).value.resources['contract:parent'].creationProof,
+    );
+  } finally {
+    await ws.close();
+  }
+});
+
 test('HCL pins lower to the same validated JSON commitments', () => {
   const hash = `0x${'ab'.repeat(32)}`;
   const source = `variable "parent_hash" {
