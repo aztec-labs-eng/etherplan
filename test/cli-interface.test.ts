@@ -40,9 +40,12 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
     'adapters',
     'status',
     'unfinished',
+    'state pull',
+    'state push',
+    'state mv',
   ]) {
     assert.match(overview.stdout, new RegExp(`\\b${command}\\b`));
-    const help = cli(command, '--help');
+    const help = cli(...command.split(' '), '--help');
     assert.equal(help.status, 0, help.stderr);
     assert.match(help.stdout, new RegExp(`Usage: etherplan ${command}`));
   }
@@ -65,6 +68,14 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
   assert.match(cli('unfinished', '--help').stdout, /--out.*unfinished saved plan/);
   assert.match(cli('unfinished', '--help').stdout, /Requires ETH_RPC_URL/);
   assert.doesNotMatch(cli('unfinished', '--help').stdout, /main\.ethp/);
+  assert.match(cli('state', 'pull', '--help').stdout, /--out.*pulled scope/);
+  assert.match(cli('state', 'pull', '--help').stdout, /Requires ETH_RPC_URL/);
+  assert.doesNotMatch(cli('state', 'pull', '--help').stdout, /main\.ethp/);
+  assert.match(cli('help', 'state', 'push').stdout, /--in.*state pull/);
+  assert.match(cli('state', 'push', '--help').stdout, /--resources/);
+  const incomplete = cli('state', 'push', '--backend', 'target.json');
+  assert.equal(incomplete.status, 2);
+  assert.match(incomplete.stderr, /state push needs --backend file\.json and --in file\.json/);
   assert.match(cli('init', '--help').stdout, /--reconfigure/);
   assert.doesNotMatch(cli('plan', '--help').stdout, /--spec/);
   assert.match(cli('plan', '--help').stdout, /main\.ethp/);

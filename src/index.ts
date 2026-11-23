@@ -41,6 +41,11 @@ export {
   validateJournal,
 } from './execution/backends.ts';
 export { createAwsBackend } from './execution/aws.ts';
+export {
+  moveScopeResource,
+  pullDeploymentScope,
+  pushDeploymentScope,
+} from './execution/scope-transfer.ts';
 export { createSignerServiceProvider } from './execution/signer-service.ts';
 export { createKmsSignerProvider } from './execution/kms-signer.ts';
 

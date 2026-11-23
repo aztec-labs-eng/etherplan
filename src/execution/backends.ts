@@ -112,9 +112,31 @@ export function encryptionContext(record: {
   };
 }
 
-function recordHash(record: object): Hash {
+export function recordHash(record: object): Hash {
   const { recordHash: _current, ...fields } = record as { recordHash?: unknown };
   return hashJson(fields);
+}
+
+/** A moved record holds one unchanged record of the action and the plan that it names, on the chain of the scope. */
+function validateMoved(
+  { movedFrom, planHash, record }: StoredJournalRecord & { phase: 'moved' },
+  scope: DeploymentScope,
+  sequence: number,
+): void {
+  if (
+    typeof movedFrom?.scope !== 'string' ||
+    !movedFrom.scope ||
+    typeof record?.recordHash !== 'string' ||
+    (record as { phase: unknown }).phase === 'moved' ||
+    record.actionId !== movedFrom.actionId ||
+    record.planHash !== planHash ||
+    record.recordHash !== recordHash(record) ||
+    record.chain?.id !== scope.chainId ||
+    record.chain.genesisHash?.toLowerCase() !== scope.genesisHash
+  )
+    throw new Error(
+      `Moved journal record ${sequence} does not hold an unchanged record of its action.`,
+    );
 }
 
 /** The rules for one record at the position that its predecessor gives it. */
@@ -144,6 +166,7 @@ function validateJournalRecord(
       'receipt',
       'verified',
       'failed',
+      'moved',
     ].includes(record.phase)
   )
     throw new Error(`Journal record ${sequence} has invalid identity or phase.`);
@@ -163,6 +186,7 @@ function validateJournalRecord(
     throw new Error('Journal contains plaintext signed transaction bytes.');
   if (record.phase === 'signed' && !record.encryptedRawTransaction)
     throw new Error(`Signed journal record ${sequence} has no ciphertext.`);
+  if (record.phase === 'moved') validateMoved(record, scope, sequence);
   validateJournalCreationProof(record, `Journal record ${sequence}`);
 }
 
@@ -232,12 +256,25 @@ export async function openStoredJournal({
   scope,
   fence,
   assertHeld,
+  planHash,
 }: OpenStoredJournalInput): Promise<Journal> {
   const persisted = await readStoredJournal(journalStore, scope);
+  // Apply reads signed bytes only to resend an unresolved transaction or to count the spend of the plan it applies.
+  // Other signatures are settled and public on chain; their ciphertext stays as stored evidence, and after
+  // `state push` it is sealed by the source backend's key.
+  const unresolved = new Set(
+    liveTransactions(persisted as unknown as JournalRecord[]).map(({ signed }) =>
+      signed.transactionHash.toLowerCase(),
+    ),
+  );
+  const needsBytes = (item: StoredJournalRecord & { phase: 'signed' }) =>
+    planHash === undefined ||
+    item.planHash === planHash ||
+    unresolved.has(item.transactionHash.toLowerCase());
   const records: JournalRecord[] = [];
   for (const item of persisted) {
-    if (item.phase !== 'signed') {
-      records.push(item);
+    if (item.phase !== 'signed' || !needsBytes(item)) {
+      records.push(item as unknown as JournalRecord);
       continue;
     }
     const bytes = await journalCipher.decrypt(
@@ -390,6 +427,9 @@ type JsonSafeInput = ReturnType<typeof jsonSafe<Parameters<Journal['append']>[0]
   rawTransaction?: Hex;
 };
 
+/** The principal of a writer that names none: the operating-system user and host. */
+export const defaultPrincipal = (): string => `${os.userInfo().username}@${os.hostname()}`;
+
 export async function acquireLeases({
   lockProvider,
   scope,
@@ -406,7 +446,7 @@ export async function acquireLeases({
     throw new Error('Applying principal must be a nonempty string.');
   const holder: LeaseHolder = {
     id: randomUUID(),
-    principal: principal ?? `${os.userInfo().username}@${os.hostname()}`,
+    principal: principal ?? defaultPrincipal(),
     host: os.hostname(),
     pid: process.pid,
     planHash,

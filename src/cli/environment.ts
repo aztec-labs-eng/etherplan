@@ -137,7 +137,9 @@ const BATCH_SIZE = 16;
 
 export function publicClient(url = process.env.ETH_RPC_URL): Client {
   if (!url)
-    throw new Error('Set ETH_RPC_URL for plan, schedule, verify, import, apply, or unfinished.');
+    throw new Error(
+      'Set ETH_RPC_URL for plan, schedule, verify, import, apply, unfinished, state pull, or state push.',
+    );
   return createPublicClient({
     transport: fallback([
       http(url, { batch: { batchSize: BATCH_SIZE }, methods: { include: BATCHED_METHODS } }),
