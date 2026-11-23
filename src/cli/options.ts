@@ -30,6 +30,7 @@ export type CliOptions = {
   'verification-timeout-ms'?: string;
   quiet?: boolean;
   json?: boolean;
+  resources?: string;
   var?: string[];
   'var-file'?: string[];
   workspace?: string;
@@ -122,6 +123,10 @@ export const COMMANDS = {
     description: 'Record a verified existing contract in local state.',
     options: ['state', 'id', 'creation-tx', 'rebaseline', ...INPUTS],
   },
+  'state rm': {
+    description: 'Remove resources from state without touching the chain.',
+    options: ['resources', 'state', 'journal', 'backend', ...INPUTS],
+  },
   output: {
     description: 'Print recorded contract and external addresses as JSON.',
     options: ['state', 'backend', 'id', 'workspace'],
@@ -148,6 +153,7 @@ const OPTION_HELP = {
   backend: 'Production backend config file',
   'signer-module': 'Signer module for plan or apply',
   id: 'Resource ID, for example contract:registry',
+  resources: 'Comma-separated resource IDs, for example contract:registry,call:setOwner',
   'creation-tx': 'Creation transaction hash used as import proof',
   rebaseline: 'Accept a rebuilt artifact for an existing imported contract',
   reconfigure: 'Accept a changed backend configuration for this project',
@@ -188,6 +194,7 @@ const VALUE_OPTIONS = new Set([
   'backend',
   'signer-module',
   'id',
+  'resources',
   'creation-tx',
   'deployers',
   'owner',
@@ -249,7 +256,7 @@ export function usage(command?: CommandName): string {
       ? '\n\nRequires ETH_RPC_URL. ETH_VERIFICATION_RPC_URL optionally selects an independent deployment-verification RPC.'
       : ['init', 'plan', 'verify', 'schedule', 'import', 'unfinished'].includes(command)
         ? '\n\nRequires ETH_RPC_URL.'
-        : command === 'output'
+        : command === 'output' || command === 'state rm'
           ? '\n\n--backend requires ETH_RPC_URL.'
           : '';
   const signers =
@@ -300,6 +307,16 @@ export function validateOptions(command: CommandName, options: CliOptions): void
   }
   if (command === 'import' && !/^contract:[a-z][a-zA-Z0-9_]*$/.test(options.id ?? '')) {
     throw new UsageError('import needs --id contract:<name>.');
+  }
+  if (
+    command === 'state rm' &&
+    !options.resources
+      ?.split(',')
+      .every((id) => /^(contract|external|call):[a-z][a-zA-Z0-9_]*$/.test(id.trim()))
+  ) {
+    throw new UsageError(
+      'state rm needs --resources with IDs such as contract:<name>, call:<name> or external:<name>.',
+    );
   }
   if (
     command === 'output' &&

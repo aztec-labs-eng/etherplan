@@ -23,6 +23,7 @@ import { init } from './commands/init.ts';
 import { output } from './commands/output.ts';
 import { plan } from './commands/plan.ts';
 import { schedule } from './commands/schedule.ts';
+import { stateRm } from './commands/state-rm.ts';
 import { status } from './commands/status.ts';
 import { unfinished } from './commands/unfinished.ts';
 import { validate } from './commands/validate.ts';
@@ -95,6 +96,8 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
       stateFile: stateFileFor(specFile, options, workspace),
       workspace,
     });
+  if (command === 'state rm')
+    return stateRm({ options, spec, stateFile: stateFileFor(specFile, options, workspace) });
   const ordered = graph(spec);
   const context = { options, specFile, workspace, spec, ordered };
   if (command === 'compile') return compile(context);
@@ -114,15 +117,22 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
   return schedule(withChain);
 }
 
+// As in Terraform, state rm is a two-word command.
+function commandWords(words: string[]): string[] {
+  return words[0] === 'state' && words[1] && !words[1].startsWith('-')
+    ? [`state ${words[1]}`, ...words.slice(2)]
+    : words;
+}
+
 export async function main(): Promise<void> {
-  const [command, ...args] = process.argv.slice(2);
+  const [command, ...args] = commandWords(process.argv.slice(2));
   if (command === '--version' || command === '-V' || command === 'version') {
     const manifest = JSON.parse(
       await readFile(new URL('../../package.json', import.meta.url), 'utf8'),
     );
     console.log(manifest.version);
   } else if (command === '--help' || command === '-h' || command === 'help') {
-    const topic = command === 'help' ? args[0] : null;
+    const topic = command === 'help' ? commandWords(args)[0] : null;
     if (topic && !isCommand(topic)) {
       console.error(`Unknown command ${topic}.\n${usage()}`);
       process.exitCode = 2;
