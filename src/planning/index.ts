@@ -376,7 +376,7 @@ export async function createPlan({
     );
     assert(
       omitted.length === 0,
-      `Module root omitted owned contracts: ${omitted.join(', ')}. Use the complete root; ownership removal is not supported.`,
+      `Module root omitted owned contracts: ${omitted.join(', ')}. Use the complete root, or remove them from state with etherplan state rm.`,
     );
   }
   const described = usesDependencyPlan(spec);

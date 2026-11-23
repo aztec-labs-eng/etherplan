@@ -9,6 +9,7 @@ Grant each runner access to the resources it needs. Scope policies by resource A
 | Initializer | DynamoDB `DescribeTable`, `DescribeContinuousBackups`, `GetItem`, `Query`, `ConditionCheckItem`, and `PutItem` on the backend table; S3 `ListBucket` and `GetBucketVersioning` on the plan bucket; KMS `DescribeKey` on the journal key. |
 | Planner | Chain read access; DynamoDB `GetItem` for state and journal head plus `Query` for the scoped journal; S3 `PutObject` and `GetObject` on its plan prefix; the KMS permission required for S3 server-side encryption. |
 | Apply runner | DynamoDB `GetItem`, `Query`, `ConditionCheckItem`, `PutItem`, and `UpdateItem` on scoped keys; S3 `GetObject` on plans; KMS `GenerateDataKey` and `Decrypt` on the journal key. |
+| State editor (`state rm`) | DynamoDB `GetItem`, `Query`, `ConditionCheckItem`, `PutItem`, and `UpdateItem` on scoped keys; no S3 access and no KMS encryption or decryption. |
 | Auditor | DynamoDB `GetItem` and `Query` only. |
 | State pull | DynamoDB `GetItem` and `Query` on the pulled scope; S3 `GetObject` on its plans, with `kms:Decrypt` on the backend key for S3 encryption. |
 | State push | The DynamoDB access of an apply runner; S3 `GetObject` and `PutObject` on its plan prefix, with `kms:GenerateDataKey` and `kms:Decrypt` on the backend key for S3 encryption. |

@@ -24,6 +24,7 @@ import { output } from './commands/output.ts';
 import { plan } from './commands/plan.ts';
 import { schedule } from './commands/schedule.ts';
 import { stateMove, statePull, statePush } from './commands/state.ts';
+import { stateRm } from './commands/state-rm.ts';
 import { status } from './commands/status.ts';
 import { unfinished } from './commands/unfinished.ts';
 import { validate } from './commands/validate.ts';
@@ -99,6 +100,8 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
       stateFile: stateFileFor(specFile, options, workspace),
       workspace,
     });
+  if (command === 'state rm')
+    return stateRm({ options, spec, stateFile: stateFileFor(specFile, options, workspace) });
   const ordered = graph(spec);
   const context = { options, specFile, workspace, spec, ordered };
   if (command === 'compile') return compile(context);
@@ -118,7 +121,7 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
   return schedule(withChain);
 }
 
-// As in Terraform, state pull, state push and state mv are two-word commands.
+// As in Terraform, state pull, state push, state mv and state rm are two-word commands.
 function commandWords(words: string[]): string[] {
   return words[0] === 'state' && words[1] && !words[1].startsWith('-')
     ? [`state ${words[1]}`, ...words.slice(2)]

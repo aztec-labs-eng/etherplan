@@ -31,4 +31,4 @@ For named roles, pass `pipeline.named` or `signers.named` as a map of role names
 
 The reporter receives JSON-safe events with plan and chain identity, scope, principal, action, sequence, and phase. Events include lock acquisition and renewal, intent, signed, broadcast attempt and result, receipt, verification, resource reuse and resume, recovery, rebroadcast, conflict, and terminal failure. Timing fields include lock wait, journal append, signer, broadcast, and receipt latency. A `step` event gives the name, the wave, and the wall time of one step of apply when it ends, also when it fails. The steps do not overlap, and the apply result lists them in `steps`. The reporter must not log raw signed bytes.
 
-[Previous: AWS permissions](permissions.md) · [Deployment scope](scope-and-recovery.md)
+[Previous: AWS permissions](permissions.md) · [Next: Remove resources from state](state-rm.md)

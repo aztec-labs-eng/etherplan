@@ -519,6 +519,28 @@ function mergeTransactions(previous: Hash[] = [], current: Hash[] = []): Hash[] 
   return transactions;
 }
 
+/**
+ * The state without the named resources, as Terraform's `state rm` leaves it: each contract stays on chain and the
+ * journal keeps its records. The result has no lastPlanHash, so no plan made before the removal applies over it.
+ */
+export function removeResources(stateInput: StateFile, ids: string[]): StateFile {
+  const state = validateState(stateInput);
+  assert(ids.length > 0, 'Name at least one resource to remove.');
+  const repeated = ids.filter((id, index) => ids.indexOf(id) !== index);
+  assert(repeated.length === 0, `Resources named more than once: ${repeated.join(', ')}.`);
+  const missing = ids.filter((id) => !Object.hasOwn(state.resources, id));
+  assert(missing.length === 0, `State has no ${missing.join(', ')}.`);
+  return validateState({
+    ...(state.moduleRoot ? { moduleRoot: state.moduleRoot } : {}),
+    ...(state.journalSequence === undefined ? {} : { journalSequence: state.journalSequence }),
+    formatVersion: 1,
+    chain: { ...state.chain },
+    resources: Object.fromEntries(
+      Object.entries(state.resources).filter(([id]) => !ids.includes(id)),
+    ),
+  });
+}
+
 export function recordResource({
   resource,
   verification,

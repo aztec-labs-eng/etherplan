@@ -126,6 +126,10 @@ export const COMMANDS = {
     description: 'Record a verified existing contract in local state.',
     options: ['state', 'id', 'creation-tx', 'rebaseline', ...INPUTS],
   },
+  'state rm': {
+    description: 'Remove resources from state without touching the chain.',
+    options: ['resources', 'state', 'journal', 'backend', ...INPUTS],
+  },
   output: {
     description: 'Print recorded contract and external addresses as JSON.',
     options: ['state', 'backend', 'id', 'workspace'],
@@ -166,6 +170,7 @@ const OPTION_HELP = {
   backend: 'Production backend config file',
   'signer-module': 'Signer module for plan or apply',
   id: 'Resource ID, for example contract:registry',
+  resources: 'Comma-separated resource IDs, for example contract:registry,call:setOwner',
   'creation-tx': 'Creation transaction hash used as import proof',
   rebaseline: 'Accept a rebuilt artifact for an existing imported contract',
   reconfigure: 'Accept a changed backend configuration for this project',
@@ -191,8 +196,6 @@ const OPTION_HELP = {
     'Suppress live apply progress (the final report, approval prompts, and errors still appear)',
   json: 'Print the structured result as JSON for scripts',
   in: 'File written by state pull',
-  resources:
-    'Comma-separated state resources to push (default: all; the whole journal is always pushed)',
   from: 'Resource ID in the --in file, for example contract:registry',
   to: 'Resource ID that the resource gets in the --out file',
   parallel: 'Use eligible deployers concurrently (default: serial)',
@@ -211,6 +214,7 @@ const VALUE_OPTIONS = new Set([
   'backend',
   'signer-module',
   'id',
+  'resources',
   'creation-tx',
   'deployers',
   'owner',
@@ -227,7 +231,6 @@ const VALUE_OPTIONS = new Set([
   'verification-timeout-ms',
   'workspace',
   'in',
-  'resources',
   'from',
   'to',
 ]);
@@ -270,13 +273,15 @@ export function usage(command?: CommandName): string {
             ? 'Pulled scope file that receives the resource; created when absent'
             : name === 'in' && command === 'state mv'
               ? 'Pulled scope file that has the resource; written again without it'
-              : name === 'out'
-                ? 'Adapter directory (default: ./generated)'
-                : name === 'plan' && command === 'apply'
-                  ? 'Saved plan file; omit to create and approve a fresh plan'
-                  : name === 'plan' && command === 'status'
-                    ? 'Saved plan file (default: ./plan.json)'
-                    : OPTION_HELP[name];
+              : name === 'resources' && command === 'state push'
+                ? 'Comma-separated state resources to push (default: all; the whole journal is always pushed)'
+                : name === 'out'
+                  ? 'Adapter directory (default: ./generated)'
+                  : name === 'plan' && command === 'apply'
+                    ? 'Saved plan file; omit to create and approve a fresh plan'
+                    : name === 'plan' && command === 'status'
+                      ? 'Saved plan file (default: ./plan.json)'
+                      : OPTION_HELP[name];
   const environment =
     command === 'apply'
       ? '\n\nRequires ETH_RPC_URL. ETH_VERIFICATION_RPC_URL optionally selects an independent deployment-verification RPC.'
@@ -291,7 +296,7 @@ export function usage(command?: CommandName): string {
             'state push',
           ].includes(command)
         ? '\n\nRequires ETH_RPC_URL.'
-        : command === 'output'
+        : command === 'output' || command === 'state rm'
           ? '\n\n--backend requires ETH_RPC_URL.'
           : '';
   const signers =
@@ -349,6 +354,16 @@ export function validateOptions(command: CommandName, options: CliOptions): void
   }
   if (command === 'import' && !/^contract:[a-z][a-zA-Z0-9_]*$/.test(options.id ?? '')) {
     throw new UsageError('import needs --id contract:<name>.');
+  }
+  if (
+    command === 'state rm' &&
+    !options.resources
+      ?.split(',')
+      .every((id) => /^(contract|external|call):[a-z][a-zA-Z0-9_]*$/.test(id.trim()))
+  ) {
+    throw new UsageError(
+      'state rm needs --resources with IDs such as contract:<name>, call:<name> or external:<name>.',
+    );
   }
   if (
     command === 'output' &&
