@@ -29,6 +29,13 @@ export type CliOptions = {
   'verification-timeout-ms'?: string;
   quiet?: boolean;
   json?: boolean;
+  from?: string;
+  to?: string;
+  'from-profile'?: string;
+  'to-profile'?: string;
+  'from-region'?: string;
+  'to-region'?: string;
+  resources?: string;
   var?: string[];
   'var-file'?: string[];
   workspace?: string;
@@ -125,7 +132,13 @@ export const COMMANDS = {
     description: 'Find the saved plan that an interrupted apply must resume.',
     options: ['backend', 'out'],
   },
+  'backend-copy': {
+    description: 'Copy a settled deployment scope to another AWS backend.',
+    options: ['from', 'to', 'from-profile', 'to-profile', 'from-region', 'to-region', 'resources'],
+  },
 };
+// Commands that read a production backend instead of a project.
+const BACKEND_COMMANDS = new Set(['status', 'unfinished', 'backend-copy']);
 const OPTION_HELP = {
   value: 'Value name for impact',
   out: 'Output path',
@@ -158,6 +171,14 @@ const OPTION_HELP = {
   quiet:
     'Suppress live apply progress (the final report, approval prompts, and errors still appear)',
   json: 'Print the structured result as JSON for scripts',
+  from: 'Backend config file to copy from; only read',
+  to: 'Backend config file to copy into; its scope names the copy',
+  'from-profile': 'AWS profile for the source backend (default: the SDK default)',
+  'to-profile': 'AWS profile for the target backend (default: the SDK default)',
+  'from-region': 'AWS region of the source backend (default: AWS_REGION, then the profile region)',
+  'to-region': 'AWS region of the target backend (default: AWS_REGION, then the profile region)',
+  resources:
+    'Comma-separated state resources to copy (default: all; the whole journal is always copied)',
   parallel: 'Use eligible deployers concurrently (default: serial)',
   pipeline: 'Use a nonce-pinned pipeline plan',
   var: 'Set a declared variable, name=value; repeatable, and the last one wins',
@@ -188,6 +209,13 @@ const VALUE_OPTIONS = new Set([
   'receipt-timeout-ms',
   'verification-timeout-ms',
   'workspace',
+  'from',
+  'to',
+  'from-profile',
+  'to-profile',
+  'from-region',
+  'to-region',
+  'resources',
 ]);
 const REPEATABLE_OPTIONS = new Set(['var', 'var-file']);
 const BOOLEAN_OPTIONS = new Set([
@@ -200,7 +228,7 @@ const BOOLEAN_OPTIONS = new Set([
 ]);
 export const SPEC_COMMANDS = Object.fromEntries(
   Object.entries(COMMANDS)
-    .filter(([name]) => name !== 'status' && name !== 'unfinished')
+    .filter(([name]) => !BACKEND_COMMANDS.has(name))
     .map(([name, details]) => [name, details.options]),
 );
 
@@ -208,10 +236,11 @@ export class UsageError extends Error {}
 
 export function usage(command?: CommandName): string {
   if (!command) {
+    const width = Math.max(...Object.keys(COMMANDS).map((name) => name.length));
     return `Usage: etherplan <command> [options]\n\nRun project commands from a directory containing main.ethp.\n\nCommands:\n${Object.entries(
       COMMANDS,
     )
-      .map(([name, details]) => `  ${name.padEnd(10)} ${details.description}`)
+      .map(([name, details]) => `  ${name.padEnd(width)} ${details.description}`)
       .join(
         '\n',
       )}\n\nRun etherplan <command> --help for options.\nRun etherplan --version for the installed version.`;
@@ -232,7 +261,9 @@ export function usage(command?: CommandName): string {
   const environment =
     command === 'apply'
       ? '\n\nRequires ETH_RPC_URL. ETH_VERIFICATION_RPC_URL optionally selects an independent deployment-verification RPC.'
-      : ['init', 'plan', 'verify', 'schedule', 'import', 'unfinished'].includes(command)
+      : ['init', 'plan', 'verify', 'schedule', 'import', 'unfinished', 'backend-copy'].includes(
+            command,
+          )
         ? '\n\nRequires ETH_RPC_URL.'
         : command === 'output'
           ? '\n\n--backend requires ETH_RPC_URL.'
@@ -241,10 +272,9 @@ export function usage(command?: CommandName): string {
     command === 'apply'
       ? ' Without --signer-module, local apply reads DEPLOYER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEYS and, for owner calls, OWNER_PRIVATE_KEY.'
       : '';
-  const project =
-    command === 'status' || command === 'unfinished'
-      ? ''
-      : '\nRun from a directory containing main.ethp; all root-level .ethp files form one project.';
+  const project = BACKEND_COMMANDS.has(command)
+    ? ''
+    : '\nRun from a directory containing main.ethp; all root-level .ethp files form one project.';
   return `Usage: etherplan ${command} [options]\n\n${details.description}${project}\n\nOptions:\n${details.options.map((name) => `  --${name.padEnd(12)} ${describe(name as keyof typeof OPTION_HELP)}`).join('\n')}\n  --help         Show this help${environment}${signers}`;
 }
 

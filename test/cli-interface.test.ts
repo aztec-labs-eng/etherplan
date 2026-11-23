@@ -40,6 +40,7 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
     'adapters',
     'status',
     'unfinished',
+    'backend-copy',
   ]) {
     assert.match(overview.stdout, new RegExp(`\\b${command}\\b`));
     const help = cli(command, '--help');
@@ -65,6 +66,14 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
   assert.match(cli('unfinished', '--help').stdout, /--out.*unfinished saved plan/);
   assert.match(cli('unfinished', '--help').stdout, /Requires ETH_RPC_URL/);
   assert.doesNotMatch(cli('unfinished', '--help').stdout, /main\.ethp/);
+  assert.match(cli('backend-copy', '--help').stdout, /--from-profile/);
+  assert.match(cli('backend-copy', '--help').stdout, /--resources/);
+  assert.match(cli('backend-copy', '--help').stdout, /--to-region/);
+  assert.match(cli('backend-copy', '--help').stdout, /Requires ETH_RPC_URL/);
+  assert.doesNotMatch(cli('backend-copy', '--help').stdout, /main\.ethp/);
+  const incomplete = cli('backend-copy', '--from', 'source.json');
+  assert.equal(incomplete.status, 2);
+  assert.match(incomplete.stderr, /needs --from and --to/);
   assert.match(cli('init', '--help').stdout, /--reconfigure/);
   assert.doesNotMatch(cli('plan', '--help').stdout, /--spec/);
   assert.match(cli('plan', '--help').stdout, /main\.ethp/);

@@ -15,6 +15,7 @@ import type { VariableValue } from '../input/variables.ts';
 import { graph } from '../spec/index.ts';
 import { adapters } from './commands/adapters.ts';
 import { apply } from './commands/apply.ts';
+import { backendCopy } from './commands/backend-copy.ts';
 import { compile } from './commands/compile.ts';
 import { graphCommand } from './commands/graph.ts';
 import { impact } from './commands/impact.ts';
@@ -57,6 +58,7 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
     throw new Error('--rebaseline applies only to import.');
   if (command === 'status') return status({ options });
   if (command === 'unfinished') return unfinished({ options });
+  if (command === 'backend-copy') return backendCopy({ options });
   const specFile = await findSpecFile();
   const config = await loadConfig(specFile, SPEC_COMMANDS);
   const merged = withConfig(options, config, command, COMMANDS[command].options);

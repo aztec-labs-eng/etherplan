@@ -10,6 +10,8 @@ Grant each runner access to the resources it needs. Scope policies by resource A
 | Planner | Chain read access; DynamoDB `GetItem` for state and journal head plus `Query` for the scoped journal; S3 `PutObject` and `GetObject` on its plan prefix; the KMS permission required for S3 server-side encryption. |
 | Apply runner | DynamoDB `GetItem`, `Query`, `ConditionCheckItem`, `PutItem`, and `UpdateItem` on scoped keys; S3 `GetObject` on plans; KMS `GenerateDataKey` and `Decrypt` on the journal key. |
 | Auditor | DynamoDB `GetItem` and `Query` only. |
+| Copy source | DynamoDB `GetItem` and `Query` on the copied scope; S3 `GetObject` on its plans, with `kms:Decrypt` on the backend key for S3 encryption. |
+| Copy target | The DynamoDB access of an apply runner; S3 `GetObject` and `PutObject` on its plan prefix, with `kms:GenerateDataKey` and `kms:Decrypt` on the backend key for S3 encryption. |
 
 After initialization, CLI state commands also use DynamoDB `DescribeTable` and KMS `DescribeKey` to confirm resource identities. Planning reads journal metadata without decrypting signed bytes.
 

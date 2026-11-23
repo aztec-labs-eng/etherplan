@@ -37,4 +37,4 @@ See [AWS permissions](permissions.md) for the initializer, planner, apply runner
 
 The local CLI remains available without `--backend`. The AWS path requires a shared table, plan bucket, symmetric KMS journal key, and signer provider. The provider can be an in-process KMS module or a separate signer service; local files are not copied to a replacement runner. Production `import` is not supported by the CLI.
 
-[Previous: AWS CLI setup](aws-cli.md) · [Next: AWS permissions](permissions.md)
+[Previous: Backend copy](backend-copy.md) · [Next: AWS permissions](permissions.md)

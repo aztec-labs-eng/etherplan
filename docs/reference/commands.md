@@ -18,6 +18,7 @@ Part of [CLI reference](index.md).
 | `init` | Yes | No | Initialized AWS backend scope and local marker. |
 | `status` | No | No | Read-only AWS deployment status. |
 | `unfinished` | Yes | No | The saved plan that an interrupted AWS apply must resume. |
+| `backend-copy` | Yes | No | A deployment scope copied into another AWS backend. |
 
 `graph`, `impact`, and `compile` check structure without loading artifacts. `validate` and `adapters` also load artifacts and ABIs. Live commands check all of those plus the chain. `output` reports saved addresses, so use `verify` when you need a current on-chain check. `import` updates local state but does not broadcast a transaction.
 
