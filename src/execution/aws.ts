@@ -391,7 +391,7 @@ export function createAwsBackend({
   async function writeRecords(
     scope: DeploymentScope,
     records: StoredJournalRecord[],
-    { expectedSequence, expectedPreviousHash, fence }: JournalAppendOptions,
+    { expectedSequence, expectedPreviousHash, fence, indexSigner = true }: JournalAppendOptions,
   ): Promise<void> {
     const last = records.at(-1);
     if (
@@ -451,7 +451,7 @@ export function createAwsBackend({
                 ConditionExpression: 'attribute_not_exists(PK)',
               },
             },
-            ...(record.phase === 'signed'
+            ...(record.phase === 'signed' && indexSigner
               ? [
                   {
                     Put: {

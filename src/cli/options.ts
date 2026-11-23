@@ -30,6 +30,8 @@ export type CliOptions = {
   'verification-timeout-ms'?: string;
   quiet?: boolean;
   json?: boolean;
+  in?: string;
+  resources?: string;
   var?: string[];
   'var-file'?: string[];
   workspace?: string;
@@ -138,7 +140,17 @@ export const COMMANDS = {
     description: 'Find the saved plan that an interrupted apply must resume.',
     options: ['backend', 'out'],
   },
+  'state pull': {
+    description: 'Write a settled deployment scope of an AWS backend to a file.',
+    options: ['backend', 'out'],
+  },
+  'state push': {
+    description: 'Write a pulled deployment scope into an empty scope of an AWS backend.',
+    options: ['backend', 'in', 'resources'],
+  },
 };
+// Commands that read a production backend instead of a project.
+const BACKEND_COMMANDS = new Set(['status', 'unfinished', 'state pull', 'state push']);
 const OPTION_HELP = {
   value: 'Value name for impact',
   out: 'Output path',
@@ -172,6 +184,9 @@ const OPTION_HELP = {
   quiet:
     'Suppress live apply progress (the final report, approval prompts, and errors still appear)',
   json: 'Print the structured result as JSON for scripts',
+  in: 'File written by state pull',
+  resources:
+    'Comma-separated state resources to push (default: all; the whole journal is always pushed)',
   parallel: 'Use eligible deployers concurrently (default: serial)',
   pipeline: 'Use a nonce-pinned pipeline plan',
   var: 'Set a declared variable, name=value; repeatable, and the last one wins',
@@ -203,6 +218,8 @@ const VALUE_OPTIONS = new Set([
   'receipt-timeout-ms',
   'verification-timeout-ms',
   'workspace',
+  'in',
+  'resources',
 ]);
 const REPEATABLE_OPTIONS = new Set(['var', 'var-file']);
 const BOOLEAN_OPTIONS = new Set([
@@ -215,7 +232,7 @@ const BOOLEAN_OPTIONS = new Set([
 ]);
 export const SPEC_COMMANDS = Object.fromEntries(
   Object.entries(COMMANDS)
-    .filter(([name]) => name !== 'status' && name !== 'unfinished')
+    .filter(([name]) => !BACKEND_COMMANDS.has(name))
     .map(([name, details]) => [name, details.options]),
 );
 
@@ -237,17 +254,28 @@ export function usage(command?: CommandName): string {
       ? 'Local plan file (default: ./plan.json; - skips the local file)'
       : name === 'out' && command === 'unfinished'
         ? 'File for the unfinished saved plan; not written when no plan is unfinished'
-        : name === 'out'
-          ? 'Adapter directory (default: ./generated)'
-          : name === 'plan' && command === 'apply'
-            ? 'Saved plan file; omit to create and approve a fresh plan'
-            : name === 'plan' && command === 'status'
-              ? 'Saved plan file (default: ./plan.json)'
-              : OPTION_HELP[name];
+        : name === 'out' && command === 'state pull'
+          ? 'File for the pulled scope'
+          : name === 'out'
+            ? 'Adapter directory (default: ./generated)'
+            : name === 'plan' && command === 'apply'
+              ? 'Saved plan file; omit to create and approve a fresh plan'
+              : name === 'plan' && command === 'status'
+                ? 'Saved plan file (default: ./plan.json)'
+                : OPTION_HELP[name];
   const environment =
     command === 'apply'
       ? '\n\nRequires ETH_RPC_URL. ETH_VERIFICATION_RPC_URL optionally selects an independent deployment-verification RPC.'
-      : ['init', 'plan', 'verify', 'schedule', 'import', 'unfinished'].includes(command)
+      : [
+            'init',
+            'plan',
+            'verify',
+            'schedule',
+            'import',
+            'unfinished',
+            'state pull',
+            'state push',
+          ].includes(command)
         ? '\n\nRequires ETH_RPC_URL.'
         : command === 'output'
           ? '\n\n--backend requires ETH_RPC_URL.'
@@ -256,10 +284,9 @@ export function usage(command?: CommandName): string {
     command === 'apply'
       ? ' Without --signer-module, local apply reads DEPLOYER_PRIVATE_KEY or DEPLOYER_PRIVATE_KEYS and, for owner calls, OWNER_PRIVATE_KEY.'
       : '';
-  const project =
-    command === 'status' || command === 'unfinished'
-      ? ''
-      : '\nRun from a directory containing main.ethp; all root-level .ethp files form one project.';
+  const project = BACKEND_COMMANDS.has(command)
+    ? ''
+    : '\nRun from a directory containing main.ethp; all root-level .ethp files form one project.';
   return `Usage: etherplan ${command} [options]\n\n${details.description}${project}\n\nOptions:\n${details.options.map((name) => `  --${name.padEnd(12)} ${describe(name as keyof typeof OPTION_HELP)}`).join('\n')}\n  --help         Show this help${environment}${signers}`;
 }
 
@@ -294,6 +321,10 @@ export function validateOptions(command: CommandName, options: CliOptions): void
     if (!allowed.has(name)) throw new UsageError(`--${name} is not an option for ${command}.`);
   }
   if (command === 'impact' && !options.value) throw new UsageError('impact needs --value <name>.');
+  if (command === 'state pull' && (!options.backend || !options.out))
+    throw new UsageError('state pull needs --backend file.json and --out file.json.');
+  if (command === 'state push' && (!options.backend || !options.in))
+    throw new UsageError('state push needs --backend file.json and --in file.json.');
   for (const assignment of options.var ?? []) {
     if (!/^[a-z][a-zA-Z0-9_]*=/.test(assignment))
       throw new UsageError(`--var ${assignment} must be name=value, for example --var owner=0x….`);

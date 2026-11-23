@@ -232,12 +232,25 @@ export async function openStoredJournal({
   scope,
   fence,
   assertHeld,
+  planHash,
 }: OpenStoredJournalInput): Promise<Journal> {
   const persisted = await readStoredJournal(journalStore, scope);
+  // Apply reads signed bytes only to resend an unresolved transaction or to count the spend of the plan it applies.
+  // Other signatures are settled and public on chain; their ciphertext stays as stored evidence, and after
+  // `state push` it is sealed by the source backend's key.
+  const unresolved = new Set(
+    liveTransactions(persisted as unknown as JournalRecord[]).map(({ signed }) =>
+      signed.transactionHash.toLowerCase(),
+    ),
+  );
+  const needsBytes = (item: StoredJournalRecord & { phase: 'signed' }) =>
+    planHash === undefined ||
+    item.planHash === planHash ||
+    unresolved.has(item.transactionHash.toLowerCase());
   const records: JournalRecord[] = [];
   for (const item of persisted) {
-    if (item.phase !== 'signed') {
-      records.push(item);
+    if (item.phase !== 'signed' || !needsBytes(item)) {
+      records.push(item as unknown as JournalRecord);
       continue;
     }
     const bytes = await journalCipher.decrypt(

@@ -368,6 +368,7 @@ export async function openApplyContext({
           scope: backend.scope,
           fence,
           assertHeld: () => lock.assertHeld(),
+          planHash: plan.planHash,
         })
       : await openJournal(journalFile!, { writerLock: localLocks!.journalLock });
     const readState: ApplyContext['readState'] = backend

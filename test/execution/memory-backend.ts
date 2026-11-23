@@ -60,7 +60,11 @@ export function memoryBackend(scope) {
       async *read(deployment = scope) {
         for (const record of recordsFor(deployment)) yield structuredClone(record);
       },
-      async append(deployment, record, { expectedSequence, expectedPreviousHash, fence }) {
+      async append(
+        deployment,
+        record,
+        { expectedSequence, expectedPreviousHash, fence, indexSigner = true },
+      ) {
         const journal = recordsFor(deployment);
         if (
           fence.length < 2 ||
@@ -69,8 +73,19 @@ export function memoryBackend(scope) {
           expectedPreviousHash !== (journal.at(-1)?.recordHash ?? null)
         )
           throw new Error('Journal fence or predecessor mismatch.');
+        const indexed =
+          record.phase === 'signed' &&
+          indexSigner &&
+          signed.some(
+            (entry) =>
+              entry.signer === record.signer.toLowerCase() &&
+              entry.chainId === deployment.chainId &&
+              entry.genesisHash === deployment.genesisHash &&
+              entry.transactionHash === record.transactionHash.toLowerCase(),
+          );
+        if (indexed) throw new Error('The signer index already has this transaction.');
         journal.push(structuredClone(record));
-        if (record.phase === 'signed')
+        if (record.phase === 'signed' && indexSigner)
           signed.push({
             project: deployment.project,
             environment: deployment.environment,

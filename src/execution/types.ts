@@ -273,6 +273,11 @@ export interface JournalAppendOptions {
   expectedSequence: number;
   expectedPreviousHash: Hash | null;
   fence: FenceEntry[] | null;
+  /**
+   * Defaults to true. False appends a signed record without its signer-index row, for a `state push` of a record
+   * whose transaction an earlier record of the journal already indexed.
+   */
+  indexSigner?: boolean;
 }
 
 export interface JournalStore {
@@ -651,6 +656,8 @@ export interface OpenStoredJournalInput {
   scope: DeploymentScope;
   fence: FenceEntry[] | null;
   assertHeld(): Promise<void>;
+  /** The plan being applied. When set, only its signatures and unresolved ones are decrypted. */
+  planHash?: Hash;
 }
 
 // Errors and events
