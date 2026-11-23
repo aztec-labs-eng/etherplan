@@ -4,7 +4,7 @@ Local state and journals suit one host. For apply runners on different hosts tha
 
 - [Deployment scope and recovery](scope-and-recovery.md): leases, fencing, journals, and confirmations.
 - [AWS CLI setup](aws-cli.md): configure and initialize DynamoDB, S3, and KMS.
-- [Backend copy](backend-copy.md): move a deployment scope to another AWS backend.
+- [State pull and push](state-pull-push.md): move a deployment scope to another AWS backend.
 - [KMS transaction signers](kms-signers.md): signer modules and permissions.
 - [AWS permissions](permissions.md): resource access for each runner role.
 - [Programmatic apply](programmatic-apply.md): integrate custom backends and signer services.

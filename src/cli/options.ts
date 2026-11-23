@@ -29,12 +29,7 @@ export type CliOptions = {
   'verification-timeout-ms'?: string;
   quiet?: boolean;
   json?: boolean;
-  from?: string;
-  to?: string;
-  'from-profile'?: string;
-  'to-profile'?: string;
-  'from-region'?: string;
-  'to-region'?: string;
+  in?: string;
   resources?: string;
   var?: string[];
   'var-file'?: string[];
@@ -132,13 +127,17 @@ export const COMMANDS = {
     description: 'Find the saved plan that an interrupted apply must resume.',
     options: ['backend', 'out'],
   },
-  'backend-copy': {
-    description: 'Copy a settled deployment scope to another AWS backend.',
-    options: ['from', 'to', 'from-profile', 'to-profile', 'from-region', 'to-region', 'resources'],
+  'state pull': {
+    description: 'Write a settled deployment scope of an AWS backend to a file.',
+    options: ['backend', 'out'],
+  },
+  'state push': {
+    description: 'Write a pulled deployment scope into an empty scope of an AWS backend.',
+    options: ['backend', 'in', 'resources'],
   },
 };
 // Commands that read a production backend instead of a project.
-const BACKEND_COMMANDS = new Set(['status', 'unfinished', 'backend-copy']);
+const BACKEND_COMMANDS = new Set(['status', 'unfinished', 'state pull', 'state push']);
 const OPTION_HELP = {
   value: 'Value name for impact',
   out: 'Output path',
@@ -171,14 +170,9 @@ const OPTION_HELP = {
   quiet:
     'Suppress live apply progress (the final report, approval prompts, and errors still appear)',
   json: 'Print the structured result as JSON for scripts',
-  from: 'Backend config file to copy from; only read',
-  to: 'Backend config file to copy into; its scope names the copy',
-  'from-profile': 'AWS profile for the source backend (default: the SDK default)',
-  'to-profile': 'AWS profile for the target backend (default: the SDK default)',
-  'from-region': 'AWS region of the source backend (default: AWS_REGION, then the profile region)',
-  'to-region': 'AWS region of the target backend (default: AWS_REGION, then the profile region)',
+  in: 'File written by state pull',
   resources:
-    'Comma-separated state resources to copy (default: all; the whole journal is always copied)',
+    'Comma-separated state resources to push (default: all; the whole journal is always pushed)',
   parallel: 'Use eligible deployers concurrently (default: serial)',
   pipeline: 'Use a nonce-pinned pipeline plan',
   var: 'Set a declared variable, name=value; repeatable, and the last one wins',
@@ -209,12 +203,7 @@ const VALUE_OPTIONS = new Set([
   'receipt-timeout-ms',
   'verification-timeout-ms',
   'workspace',
-  'from',
-  'to',
-  'from-profile',
-  'to-profile',
-  'from-region',
-  'to-region',
+  'in',
   'resources',
 ]);
 const REPEATABLE_OPTIONS = new Set(['var', 'var-file']);
@@ -236,11 +225,10 @@ export class UsageError extends Error {}
 
 export function usage(command?: CommandName): string {
   if (!command) {
-    const width = Math.max(...Object.keys(COMMANDS).map((name) => name.length));
     return `Usage: etherplan <command> [options]\n\nRun project commands from a directory containing main.ethp.\n\nCommands:\n${Object.entries(
       COMMANDS,
     )
-      .map(([name, details]) => `  ${name.padEnd(width)} ${details.description}`)
+      .map(([name, details]) => `  ${name.padEnd(10)} ${details.description}`)
       .join(
         '\n',
       )}\n\nRun etherplan <command> --help for options.\nRun etherplan --version for the installed version.`;
@@ -251,19 +239,28 @@ export function usage(command?: CommandName): string {
       ? 'Local plan file (default: ./plan.json; - skips the local file)'
       : name === 'out' && command === 'unfinished'
         ? 'File for the unfinished saved plan; not written when no plan is unfinished'
-        : name === 'out'
-          ? 'Adapter directory (default: ./generated)'
-          : name === 'plan' && command === 'apply'
-            ? 'Saved plan file; omit to create and approve a fresh plan'
-            : name === 'plan' && command === 'status'
-              ? 'Saved plan file (default: ./plan.json)'
-              : OPTION_HELP[name];
+        : name === 'out' && command === 'state pull'
+          ? 'File for the pulled scope'
+          : name === 'out'
+            ? 'Adapter directory (default: ./generated)'
+            : name === 'plan' && command === 'apply'
+              ? 'Saved plan file; omit to create and approve a fresh plan'
+              : name === 'plan' && command === 'status'
+                ? 'Saved plan file (default: ./plan.json)'
+                : OPTION_HELP[name];
   const environment =
     command === 'apply'
       ? '\n\nRequires ETH_RPC_URL. ETH_VERIFICATION_RPC_URL optionally selects an independent deployment-verification RPC.'
-      : ['init', 'plan', 'verify', 'schedule', 'import', 'unfinished', 'backend-copy'].includes(
-            command,
-          )
+      : [
+            'init',
+            'plan',
+            'verify',
+            'schedule',
+            'import',
+            'unfinished',
+            'state pull',
+            'state push',
+          ].includes(command)
         ? '\n\nRequires ETH_RPC_URL.'
         : command === 'output'
           ? '\n\n--backend requires ETH_RPC_URL.'
@@ -309,6 +306,10 @@ export function validateOptions(command: CommandName, options: CliOptions): void
     if (!allowed.has(name)) throw new UsageError(`--${name} is not an option for ${command}.`);
   }
   if (command === 'impact' && !options.value) throw new UsageError('impact needs --value <name>.');
+  if (command === 'state pull' && (!options.backend || !options.out))
+    throw new UsageError('state pull needs --backend file.json and --out file.json.');
+  if (command === 'state push' && (!options.backend || !options.in))
+    throw new UsageError('state push needs --backend file.json and --in file.json.');
   for (const assignment of options.var ?? []) {
     if (!/^[a-z][a-zA-Z0-9_]*=/.test(assignment))
       throw new UsageError(`--var ${assignment} must be name=value, for example --var owner=0x….`);

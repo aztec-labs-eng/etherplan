@@ -271,7 +271,7 @@ export interface JournalAppendOptions {
   expectedPreviousHash: Hash | null;
   fence: FenceEntry[] | null;
   /**
-   * Defaults to true. False appends a signed record without its signer-index row, for a backend copy of a record
+   * Defaults to true. False appends a signed record without its signer-index row, for a `state push` of a record
    * whose transaction an earlier record of the journal already indexed.
    */
   indexSigner?: boolean;
@@ -323,10 +323,6 @@ export interface AwsBackendOptions {
   kmsKeyId: string;
   bucket?: string;
   prefix?: string;
-  /** AWS shared-config profile for the default clients; a client passed in keeps its own. */
-  profile?: string;
-  /** AWS region for the default clients; a client passed in keeps its own. */
-  region?: string;
   dynamodb?: DynamoDBDocumentClient;
   kms?: KMSClient;
   s3?: S3Client;

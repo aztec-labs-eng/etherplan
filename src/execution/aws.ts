@@ -55,13 +55,8 @@ const DYNAMODB_REQUEST_TIMEOUT_MS = 5_000;
 const DYNAMODB_CONNECTION_TIMEOUT_MS = 3_000;
 const DYNAMODB_MAX_ATTEMPTS = 3;
 
-function clientConfig(profile: string | undefined, region: string | undefined) {
-  return { ...(profile ? { profile } : {}), ...(region ? { region } : {}) };
-}
-
-function dynamoDbClient(profile: string | undefined, region: string | undefined): DynamoDBClient {
+function dynamoDbClient(): DynamoDBClient {
   return new DynamoDBClient({
-    ...clientConfig(profile, region),
     maxAttempts: DYNAMODB_MAX_ATTEMPTS,
     requestHandler: {
       requestTimeout: DYNAMODB_REQUEST_TIMEOUT_MS,
@@ -123,13 +118,11 @@ export function createAwsBackend({
   kmsKeyId,
   bucket,
   prefix = 'etherplan',
-  profile,
-  region,
-  dynamodb = DynamoDBDocumentClient.from(dynamoDbClient(profile, region), {
+  dynamodb = DynamoDBDocumentClient.from(dynamoDbClient(), {
     marshallOptions: { removeUndefinedValues: true },
   }),
-  kms = new KMSClient(clientConfig(profile, region)),
-  s3 = new S3Client(clientConfig(profile, region)),
+  kms = new KMSClient({}),
+  s3 = new S3Client({}),
 }: AwsBackendOptions): AwsBackend {
   if (!tableName || !kmsKeyId) throw new Error('AWS backend needs tableName and kmsKeyId.');
   const lockProvider: LockProvider = {

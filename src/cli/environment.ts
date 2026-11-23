@@ -132,7 +132,7 @@ function isPrivateKey(value: string): value is Hex {
 export function publicClient(): Client {
   if (!process.env.ETH_RPC_URL)
     throw new Error(
-      'Set ETH_RPC_URL for plan, schedule, verify, import, apply, unfinished, or backend-copy.',
+      'Set ETH_RPC_URL for plan, schedule, verify, import, apply, unfinished, state pull, or state push.',
     );
   return createPublicClient({ transport: http(process.env.ETH_RPC_URL) });
 }
@@ -209,11 +209,7 @@ export async function readAwsBackendConfig(file: string): Promise<AwsBackendConf
 export async function backendFromFile(
   file: string,
   chain: ChainIdentity,
-  {
-    requireBucket = false,
-    profile,
-    region,
-  }: { requireBucket?: boolean; profile?: string; region?: string } = {},
+  { requireBucket = false }: { requireBucket?: boolean } = {},
 ): Promise<Backend> {
   const config = await readAwsBackendConfig(file);
   if (requireBucket && !config.bucket)
@@ -225,8 +221,6 @@ export async function backendFromFile(
       kmsKeyId: config.kmsKeyId,
       ...(config.bucket ? { bucket: config.bucket } : {}),
       ...(config.prefix ? { prefix: config.prefix } : {}),
-      ...(profile ? { profile } : {}),
-      ...(region ? { region } : {}),
     }),
     scope,
     ...(config.ttlMs !== undefined ? { ttlMs: config.ttlMs } : {}),

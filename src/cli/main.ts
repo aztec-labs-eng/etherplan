@@ -15,7 +15,6 @@ import type { VariableValue } from '../input/variables.ts';
 import { graph } from '../spec/index.ts';
 import { adapters } from './commands/adapters.ts';
 import { apply } from './commands/apply.ts';
-import { backendCopy } from './commands/backend-copy.ts';
 import { compile } from './commands/compile.ts';
 import { graphCommand } from './commands/graph.ts';
 import { impact } from './commands/impact.ts';
@@ -24,6 +23,7 @@ import { init } from './commands/init.ts';
 import { output } from './commands/output.ts';
 import { plan } from './commands/plan.ts';
 import { schedule } from './commands/schedule.ts';
+import { statePull, statePush } from './commands/state.ts';
 import { status } from './commands/status.ts';
 import { unfinished } from './commands/unfinished.ts';
 import { validate } from './commands/validate.ts';
@@ -58,7 +58,8 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
     throw new Error('--rebaseline applies only to import.');
   if (command === 'status') return status({ options });
   if (command === 'unfinished') return unfinished({ options });
-  if (command === 'backend-copy') return backendCopy({ options });
+  if (command === 'state pull') return statePull({ options });
+  if (command === 'state push') return statePush({ options });
   const specFile = await findSpecFile();
   const config = await loadConfig(specFile, SPEC_COMMANDS);
   const merged = withConfig(options, config, command, COMMANDS[command].options);
@@ -116,15 +117,22 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
   return schedule(withChain);
 }
 
+// As in Terraform, state pull and state push are two-word commands.
+function commandWords(words: string[]): string[] {
+  return words[0] === 'state' && words[1] && !words[1].startsWith('-')
+    ? [`state ${words[1]}`, ...words.slice(2)]
+    : words;
+}
+
 export async function main(): Promise<void> {
-  const [command, ...args] = process.argv.slice(2);
+  const [command, ...args] = commandWords(process.argv.slice(2));
   if (command === '--version' || command === '-V' || command === 'version') {
     const manifest = JSON.parse(
       await readFile(new URL('../../package.json', import.meta.url), 'utf8'),
     );
     console.log(manifest.version);
   } else if (command === '--help' || command === '-h' || command === 'help') {
-    const topic = command === 'help' ? args[0] : null;
+    const topic = command === 'help' ? commandWords(args)[0] : null;
     if (topic && !isCommand(topic)) {
       console.error(`Unknown command ${topic}.\n${usage()}`);
       process.exitCode = 2;

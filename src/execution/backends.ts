@@ -226,8 +226,8 @@ export async function openStoredJournal({
 }: OpenStoredJournalInput): Promise<Journal> {
   const persisted = await readStoredJournal(journalStore, scope);
   // Apply reads signed bytes only to resend an unresolved transaction or to count the spend of the plan it applies.
-  // Other signatures are settled and public on chain; their ciphertext stays as stored evidence, and after a backend
-  // copy it is sealed by the source backend's key.
+  // Other signatures are settled and public on chain; their ciphertext stays as stored evidence, and after
+  // `state push` it is sealed by the source backend's key.
   const unresolved = new Set(
     liveTransactions(persisted as unknown as JournalRecord[]).map(({ signed }) =>
       signed.transactionHash.toLowerCase(),

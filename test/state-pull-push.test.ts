@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { getContractAddress, keccak256 } from 'viem';
 import { applyPlan } from '../src/execution/index.ts';
-import { copyDeploymentScope } from '../src/execution/backend-copy.ts';
-import { acquireLeases, readStoredJournal } from '../src/execution/backends.ts';
+import { acquireLeases, readStoredJournal, scopeKey } from '../src/execution/backends.ts';
+import { pullDeploymentScope, pushDeploymentScope } from '../src/execution/scope-transfer.ts';
 import { hashJson } from '../src/identity.ts';
 import { createPlan, prepareResources } from '../src/planning/index.ts';
 import { graph, parseSpec } from '../src/spec/index.ts';
@@ -93,24 +93,30 @@ async function setup() {
   return { chain, spec, artifacts, scope, input, apply };
 }
 
-// What a backend copy does: the state value and every journal record verbatim, in a backend with its own key.
+// The pulled scope goes through a file between state pull and state push.
+const throughFile = (value) => JSON.parse(JSON.stringify(value));
+
+// Pulls a scope from one backend and pushes it into another with its own key.
 async function copyScope(source, target, scope) {
-  const state = await source.stateStore.read(scope);
-  const records = await readStoredJournal(source.journalStore, scope);
-  target.recordsFor(scope).push(...structuredClone(records));
-  const leases = await acquireLeases({
-    lockProvider: target.lockProvider,
-    scope,
-    addresses: [deployerA.address],
-    planHash: `0x${'00'.repeat(32)}`,
-    principal: 'backend-copy',
-  });
-  try {
-    await target.stateStore.compareAndSwap(scope, null, state.value, { fence: leases.fence });
-  } finally {
-    await leases.release();
-  }
-  return records;
+  const pulled = throughFile(await pullDeploymentScope({ backend: source, scope }));
+  await pushDeploymentScope({ backend: target, pulled });
+  return pulled.journal;
+}
+
+function planStore() {
+  const plans = new Map();
+  return {
+    async put(scope, plan) {
+      plans.set(`${scopeKey(scope)}/${plan.planHash}`, structuredClone(plan));
+      return { bucket: 'memory', key: plan.planHash, planHash: plan.planHash };
+    },
+    async read(scope, planHash) {
+      const plan = plans.get(`${scopeKey(scope)}/${planHash}`);
+      if (!plan)
+        throw Object.assign(new Error(`No saved plan ${planHash}.`), { name: 'NoSuchKey' });
+      return structuredClone(plan);
+    },
+  };
 }
 
 test('a copied pinned-runtime scope plans reuse in a backend with another key', async () => {
@@ -239,7 +245,7 @@ test('a resource subset of a scope, with its whole journal, plans reuse and appl
       scope,
       addresses: [deployerA.address],
       planHash: `0x${'00'.repeat(32)}`,
-      principal: 'backend-copy',
+      principal: 'state-push',
     });
     await target.stateStore.compareAndSwap(scope, null, subset, { fence: leases.fence });
     await leases.release();
@@ -264,7 +270,7 @@ test('a resource subset of a scope, with its whole journal, plans reuse and appl
   }
 });
 
-test('copyDeploymentScope copies a settled scope, a resource subset under a new scope, and refuses unsafe copies', async () => {
+test('state pull and push move a settled scope, a resource subset under a new scope, and refuse unsafe pushes', async () => {
   const ws = await setup();
   try {
     ws.spec.contracts.push({
@@ -277,14 +283,13 @@ test('copyDeploymentScope copies a settled scope, a resource subset under a new 
     pinned(ws.spec, ws.artifacts, 'gadget');
     const source = memoryBackend(ws.scope);
     await ws.apply(source, await createPlan(ws.input));
+    const pulled = throughFile(await pullDeploymentScope({ backend: source, scope: ws.scope }));
     const target = memoryBackend(ws.scope);
-    const report = await copyDeploymentScope({ source, target, sourceScope: ws.scope });
+    const report = await pushDeploymentScope({ backend: target, pulled });
     assert.equal(report.records, (await readStoredJournal(source.journalStore, ws.scope)).length);
     assert.deepEqual(report.resources.sort(), ['contract:gadget', 'contract:parent']);
-    await assert.rejects(
-      copyDeploymentScope({ source, target, sourceScope: ws.scope }),
-      /already has state/,
-    );
+    assert.equal(report.resumedAt, 0);
+    await assert.rejects(pushDeploymentScope({ backend: target, pulled }), /already has state/);
     const whole = await createPlan({
       ...ws.input,
       state: (await target.stateStore.read(ws.scope)).value,
@@ -302,31 +307,42 @@ test('copyDeploymentScope copies a settled scope, a resource subset under a new 
       environment: 'v6-staging__bgd-susds-v6',
     };
     const gadgets = memoryBackend(gadgetsScope);
-    const subset = await copyDeploymentScope({
-      source,
-      target: gadgets,
-      sourceScope: ws.scope,
-      targetScope: gadgetsScope,
+    const subset = await pushDeploymentScope({
+      backend: gadgets,
+      pulled,
+      scope: gadgetsScope,
       resources: ['contract:gadget'],
     });
     assert.deepEqual(subset.resources, ['contract:gadget']);
+    assert.equal(subset.pulledScope, report.scope);
     await assert.rejects(
-      copyDeploymentScope({
-        source,
-        target: memoryBackend(ws.scope),
-        sourceScope: ws.scope,
+      pushDeploymentScope({
+        backend: memoryBackend(ws.scope),
+        pulled,
         resources: ['contract:nope'],
       }),
       /has no contract:nope/,
     );
     await assert.rejects(
-      copyDeploymentScope({
-        source,
-        target: memoryBackend(ws.scope),
-        sourceScope: ws.scope,
-        targetScope: { ...ws.scope, chainId: 1 },
+      pushDeploymentScope({
+        backend: memoryBackend(ws.scope),
+        pulled,
+        scope: { ...ws.scope, chainId: 1 },
       }),
       /keeps the chain/,
+    );
+    await assert.rejects(
+      pushDeploymentScope({
+        backend: memoryBackend(ws.scope),
+        pulled: { ...pulled, formatVersion: 2 },
+      }),
+      /not a scope from etherplan state pull/,
+    );
+    const tampered = throughFile(pulled);
+    tampered.journal[0].actionId = 'contract:other';
+    await assert.rejects(
+      pushDeploymentScope({ backend: memoryBackend(ws.scope), pulled: tampered }),
+      /integrity failure/,
     );
     ws.spec.contracts = ws.spec.contracts.filter((c) => c.id === 'gadget');
     const only = await createPlan({
@@ -344,7 +360,7 @@ test('copyDeploymentScope copies a settled scope, a resource subset under a new 
   }
 });
 
-test('copyDeploymentScope refuses a scope with an unresolved transaction', async () => {
+test('state pull and push refuse a scope with an unresolved transaction', async () => {
   const ws = await setup();
   try {
     const source = memoryBackend(ws.scope);
@@ -362,9 +378,22 @@ test('copyDeploymentScope refuses a scope with an unresolved transaction', async
       }),
       /simulate runner loss/,
     );
-    const target = memoryBackend(ws.scope);
     await assert.rejects(
-      copyDeploymentScope({ source, target, sourceScope: ws.scope }),
+      pullDeploymentScope({ backend: source, scope: ws.scope }),
+      /unresolved transactions/,
+    );
+    const target = memoryBackend(ws.scope);
+    const pulled = {
+      format: 'etherplan-scope',
+      formatVersion: 1,
+      scope: ws.scope,
+      state: null,
+      journal: await readStoredJournal(source.journalStore, ws.scope),
+      plans: [],
+      plansMissing: [],
+    };
+    await assert.rejects(
+      pushDeploymentScope({ backend: target, pulled }),
       /unresolved transactions/,
     );
     assert.equal(target.recordsFor(ws.scope).length, 0);
@@ -373,27 +402,63 @@ test('copyDeploymentScope refuses a scope with an unresolved transaction', async
   }
 });
 
-test('copyDeploymentScope resumes an interrupted copy from the prefix it wrote', async () => {
+test('state push resumes an interrupted push from the prefix it wrote', async () => {
   const ws = await setup();
   try {
     const source = memoryBackend(ws.scope);
     await ws.apply(source, await createPlan(ws.input));
-    const records = await readStoredJournal(source.journalStore, ws.scope);
+    const pulled = throughFile(await pullDeploymentScope({ backend: source, scope: ws.scope }));
     const target = memoryBackend(ws.scope);
-    target.recordsFor(ws.scope).push(...structuredClone(records.slice(0, 2)));
-    const report = await copyDeploymentScope({ source, target, sourceScope: ws.scope });
+    target.recordsFor(ws.scope).push(...structuredClone(pulled.journal.slice(0, 2)));
+    const report = await pushDeploymentScope({ backend: target, pulled });
     assert.equal(report.resumedAt, 2);
-    assert.equal(report.records, records.length);
+    assert.equal(report.records, pulled.journal.length);
     const forged = memoryBackend(ws.scope);
     forged
       .recordsFor(ws.scope)
-      .push({ ...structuredClone(records[0]), recordHash: `0x${'ee'.repeat(32)}` });
-    await assert.rejects(copyDeploymentScope({ source, target: forged, sourceScope: ws.scope }));
+      .push({ ...structuredClone(pulled.journal[0]), recordHash: `0x${'ee'.repeat(32)}` });
+    await assert.rejects(pushDeploymentScope({ backend: forged, pulled }));
   } finally {
     await ws.chain.stop();
   }
 });
-test('copyDeploymentScope copies a hand-repaired journal that signs one transaction under two actions', async () => {
+
+test('state pull carries the saved plans, and state push needs a plan bucket for them', async () => {
+  const ws = await setup();
+  try {
+    const source = memoryBackend(ws.scope);
+    const plan = await createPlan(ws.input);
+    await ws.apply(source, plan);
+    source.planStore = planStore();
+    const without = await pullDeploymentScope({ backend: source, scope: ws.scope });
+    assert.deepEqual(without.plansMissing, [plan.planHash]);
+    await source.planStore.put(ws.scope, plan);
+    const pulled = throughFile(await pullDeploymentScope({ backend: source, scope: ws.scope }));
+    assert.deepEqual(pulled.plans, throughFile([plan]));
+    assert.deepEqual(pulled.plansMissing, []);
+    const bare = memoryBackend(ws.scope);
+    await assert.rejects(pushDeploymentScope({ backend: bare, pulled }), /no plan bucket/);
+    assert.equal(bare.recordsFor(ws.scope).length, 0);
+    const target = memoryBackend(ws.scope);
+    target.planStore = planStore();
+    assert.equal((await pushDeploymentScope({ backend: target, pulled })).plans, 1);
+    assert.deepEqual(await target.planStore.read(ws.scope, plan.planHash), pulled.plans[0]);
+    const read = source.planStore.read;
+    source.planStore.read = async (scope, planHash) => {
+      const journal = source.recordsFor(scope);
+      journal.push({ ...structuredClone(journal.at(-1)), recordHash: `0x${'ab'.repeat(32)}` });
+      return read(scope, planHash);
+    };
+    await assert.rejects(
+      pullDeploymentScope({ backend: source, scope: ws.scope }),
+      /changed during the pull/,
+    );
+  } finally {
+    await ws.chain.stop();
+  }
+});
+
+test('state push of a hand-repaired journal that signs one transaction under two actions indexes it once', async () => {
   const ws = await setup();
   try {
     const source = memoryBackend(ws.scope);
@@ -413,7 +478,8 @@ test('copyDeploymentScope copies a hand-repaired journal that signs one transact
     assert.equal(signed.length, 2);
     assert.equal(signed[0].transactionHash, signed[1].transactionHash);
     const target = memoryBackend(ws.scope);
-    const report = await copyDeploymentScope({ source, target, sourceScope: ws.scope });
+    const pulled = throughFile(await pullDeploymentScope({ backend: source, scope: ws.scope }));
+    const report = await pushDeploymentScope({ backend: target, pulled });
     assert.equal(report.signedRecords, 2);
     assert.deepEqual(await readStoredJournal(target.journalStore, ws.scope), journal);
     const rows = [];
