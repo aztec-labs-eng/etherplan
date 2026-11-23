@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
+  moveScopeResource,
   pullDeploymentScope,
   pushDeploymentScope,
   summarizePulledScope,
@@ -44,4 +45,30 @@ export async function statePush({ options }: CommandContext): Promise<void> {
       ...(backend.ttlMs !== undefined ? { ttlMs: backend.ttlMs } : {}),
     }),
   );
+}
+
+// Moves one resource between two files of state pull. It reads no backend and no chain.
+export async function stateMove({ options }: CommandContext): Promise<void> {
+  const [source, target] = [path.resolve(options.in!), path.resolve(options.out!)];
+  if (source === target) throw new Error('state mv moves a resource between two files.');
+  const read = async (file: string) => JSON.parse(await readFile(file, 'utf8')) as PulledScope;
+  const to = await read(target).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error;
+  });
+  const moved = moveScopeResource({
+    from: await read(source),
+    ...(to ? { to } : {}),
+    source: options.from!,
+    destination: options.to!,
+  });
+  // The destination goes first: a run that stops between the two writes leaves the resource in both files, and the
+  // next run refuses it.
+  await writeJsonAtomic(target, moved.to);
+  await writeJsonAtomic(source, moved.from);
+  print({
+    ...summarizePulledScope(moved.to),
+    moved: { from: options.from, to: options.to, journalRecords: moved.movedRecords },
+    in: source,
+    out: target,
+  });
 }

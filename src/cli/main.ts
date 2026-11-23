@@ -23,7 +23,7 @@ import { init } from './commands/init.ts';
 import { output } from './commands/output.ts';
 import { plan } from './commands/plan.ts';
 import { schedule } from './commands/schedule.ts';
-import { statePull, statePush } from './commands/state.ts';
+import { stateMove, statePull, statePush } from './commands/state.ts';
 import { status } from './commands/status.ts';
 import { unfinished } from './commands/unfinished.ts';
 import { validate } from './commands/validate.ts';
@@ -60,6 +60,7 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
   if (command === 'unfinished') return unfinished({ options });
   if (command === 'state pull') return statePull({ options });
   if (command === 'state push') return statePush({ options });
+  if (command === 'state mv') return stateMove({ options });
   const specFile = await findSpecFile();
   const config = await loadConfig(specFile, SPEC_COMMANDS);
   const merged = withConfig(options, config, command, COMMANDS[command].options);
@@ -117,7 +118,7 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
   return schedule(withChain);
 }
 
-// As in Terraform, state pull and state push are two-word commands.
+// As in Terraform, state pull, state push and state mv are two-word commands.
 function commandWords(words: string[]): string[] {
   return words[0] === 'state' && words[1] && !words[1].startsWith('-')
     ? [`state ${words[1]}`, ...words.slice(2)]

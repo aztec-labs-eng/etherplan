@@ -2,8 +2,15 @@ import { hashJson } from '../identity.ts';
 import type { Plan } from '../planning/types.ts';
 import { validateState } from '../state/index.ts';
 import type { StateFile } from '../state/types.ts';
-import type { Address, Hash } from '../types.ts';
-import { acquireLeases, readStoredJournal, scopeKey, validateJournal } from './backends.ts';
+import type { Address, ContractId, Hash } from '../types.ts';
+import {
+  acquireLeases,
+  defaultPrincipal,
+  readStoredJournal,
+  recordHash,
+  scopeKey,
+  validateJournal,
+} from './backends.ts';
 import { liveTransactions } from './journal.ts';
 import type {
   DeploymentScope,
@@ -69,6 +76,15 @@ export interface PushReport extends ScopeSummary {
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as Address;
 const ZERO_HASH = `0x${'00'.repeat(32)}` as Hash;
+
+function assertPulledScope(pulled: PulledScope): void {
+  if (pulled?.format !== 'etherplan-scope' || pulled.formatVersion !== 1)
+    throw new Error('The file is not a scope from etherplan state pull, format version 1.');
+}
+
+const sameChain = (left: DeploymentScope, right: DeploymentScope): boolean =>
+  left.chainId === right.chainId &&
+  left.genesisHash.toLowerCase() === right.genesisHash.toLowerCase();
 
 function refuseUnresolved(records: StoredJournalRecord[], where: string): void {
   const live = liveTransactions(records as unknown as JournalRecord[]);
@@ -188,12 +204,8 @@ export async function pushDeploymentScope({
   principal,
   ttlMs,
 }: PushDeploymentScopeInput): Promise<PushReport> {
-  if (pulled?.format !== 'etherplan-scope' || pulled.formatVersion !== 1)
-    throw new Error('The file is not a scope from etherplan state pull, format version 1.');
-  if (
-    scope.chainId !== pulled.scope.chainId ||
-    scope.genesisHash.toLowerCase() !== pulled.scope.genesisHash.toLowerCase()
-  )
+  assertPulledScope(pulled);
+  if (!sameChain(scope, pulled.scope))
     throw new Error('A push keeps the chain; the target scope names another chain.');
   const records = pulled.journal;
   validateJournal(records, scope);
@@ -272,5 +284,111 @@ export async function pushDeploymentScope({
     pulledScope: scopeKey(pulled.scope),
     ...summarize(scope, pushed, records, pulled.plans.length, pulled.plansMissing),
     resumedAt: existing.length,
+  };
+}
+
+export interface MoveScopeResourceInput {
+  /** The pulled scope that has the resource. */
+  from: PulledScope;
+  /** The pulled scope that receives it. Without one, the move starts a scope with the names and the chain of `from`. */
+  to?: PulledScope;
+  /** The resource ID in `from`. */
+  source: string;
+  /** The resource ID in `to`. */
+  destination: string;
+  principal?: string;
+}
+
+export interface MoveScopeResourceResult {
+  /** `from` without the resource. Its journal is unchanged, because its hash chain cannot be cut. */
+  from: PulledScope;
+  to: PulledScope;
+  /** The journal records of the resource that went into the journal of `to`. */
+  movedRecords: number;
+}
+
+/**
+ * Moves one resource from a pulled scope to another pulled scope under another resource ID, as Terraform's `state mv`
+ * does between two state files. State goes to state: the record leaves `from`. Journal goes to journal: each journal
+ * record of the resource goes into the journal of `to` as a `moved` record that holds it unchanged, so a
+ * pinned-runtime proof keeps its evidence. The saved plans that those records name go along. It reads no backend and
+ * no chain; `state push` writes `to` into an empty scope.
+ */
+export function moveScopeResource({
+  from,
+  to = {
+    format: 'etherplan-scope',
+    formatVersion: 1,
+    scope: from.scope,
+    state: { formatVersion: 1, chain: from.state.chain, resources: {} },
+    journal: [],
+    plans: [],
+    plansMissing: [],
+  },
+  source,
+  destination,
+  principal = defaultPrincipal(),
+}: MoveScopeResourceInput): MoveScopeResourceResult {
+  assertPulledScope(from);
+  assertPulledScope(to);
+  if (!sameChain(from.scope, to.scope))
+    throw new Error('A move keeps the chain; the two scopes name different chains.');
+  validateJournal(from.journal, from.scope);
+  const resources = from.state.resources as Record<string, StateFile['resources'][ContractId]>;
+  const { [source]: resource, ...rest } = resources;
+  if (!resource) throw new Error(`The source state has no ${source}.`);
+  if (Object.hasOwn(to.state.resources, destination))
+    throw new Error(`The destination state already has ${destination}.`);
+
+  // A record that an earlier move carried keeps the scope and the resource ID that it first had.
+  const carried = from.journal.flatMap((record) =>
+    record.actionId !== source
+      ? []
+      : record.phase === 'moved'
+        ? [{ movedFrom: record.movedFrom, record: record.record }]
+        : [{ movedFrom: { scope: scopeKey(from.scope), actionId: source }, record }],
+  );
+  const journal = [...to.journal];
+  const at = new Date().toISOString();
+  for (const { movedFrom, record } of carried) {
+    const fields = {
+      formatVersion: 2,
+      sequence: journal.length + 1,
+      at,
+      principal,
+      previousHash: journal.at(-1)?.recordHash ?? null,
+      planHash: record.planHash,
+      chain: record.chain,
+      actionId: destination,
+      phase: 'moved',
+      movedFrom,
+      record,
+    };
+    journal.push({ ...fields, recordHash: recordHash(fields) } as StoredJournalRecord);
+  }
+  validateJournal(journal, to.scope);
+
+  const named = new Set(carried.map(({ record }) => record.planHash));
+  const held = new Set(to.plans.map((plan) => plan.planHash));
+  const plans = [
+    ...to.plans,
+    ...from.plans.filter((plan) => named.has(plan.planHash) && !held.has(plan.planHash)),
+  ];
+  const saved = new Set(plans.map((plan) => plan.planHash));
+  return {
+    from: { ...from, state: { ...from.state, resources: rest } as StateFile },
+    to: {
+      ...to,
+      state: validateState({
+        ...to.state,
+        resources: { ...to.state.resources, [destination]: resource },
+      }),
+      journal,
+      plans,
+      plansMissing: [
+        ...new Set([...to.plansMissing, ...[...named].filter((hash) => !saved.has(hash))]),
+      ],
+    },
+    movedRecords: carried.length,
   };
 }

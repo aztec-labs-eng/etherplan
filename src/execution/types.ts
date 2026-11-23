@@ -400,7 +400,14 @@ export interface DeploymentStatus {
 // Journal
 
 export type JournalPhase =
-  'intent' | 'signed' | 'broadcast-attempt' | 'broadcast' | 'receipt' | 'verified' | 'failed';
+  | 'intent'
+  | 'signed'
+  | 'broadcast-attempt'
+  | 'broadcast'
+  | 'receipt'
+  | 'verified'
+  | 'failed'
+  | 'moved';
 
 /** A transaction in one of these phases may still change the chain or hold its signer's next nonce. */
 export type LivePhase = 'signed' | 'broadcast-attempt' | 'broadcast' | 'receipt';
@@ -559,6 +566,18 @@ export interface FailedFields {
   spentWei?: DecimalString;
 }
 
+/**
+ * A record that `state mv` took from the journal of another scope. `record` is that record, unchanged. The envelope
+ * has the plan hash of that record and the resource ID that its action has in this scope. Only a stored journal has
+ * these records, and apply writes none.
+ */
+export interface MovedFields {
+  phase: 'moved';
+  /** The scope key and the resource ID that the record had. */
+  movedFrom: { scope: string; actionId: ResourceId };
+  record: Exclude<StoredJournalRecord, { phase: 'moved' }>;
+}
+
 export type JournalPhaseFields =
   | IntentFields
   | SignedFields
@@ -566,7 +585,8 @@ export type JournalPhaseFields =
   | BroadcastFields
   | ReceiptFields
   | VerifiedFields
-  | FailedFields;
+  | FailedFields
+  | MovedFields;
 
 export interface JournalIdentity {
   planHash: Hash;
@@ -639,7 +659,7 @@ export type IntentRecord = JournalRecord & IntentFields;
 
 /** A signed transaction that may still reach the chain, from liveTransactions. */
 export interface LiveTransaction {
-  latest: JournalRecord;
+  latest: Exclude<JournalRecord, { phase: 'moved' }>;
   signed: SignedRecord;
 }
 

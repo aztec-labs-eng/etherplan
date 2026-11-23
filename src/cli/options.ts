@@ -32,6 +32,8 @@ export type CliOptions = {
   json?: boolean;
   in?: string;
   resources?: string;
+  from?: string;
+  to?: string;
   var?: string[];
   'var-file'?: string[];
   workspace?: string;
@@ -148,9 +150,13 @@ export const COMMANDS = {
     description: 'Write a pulled deployment scope into an empty scope of an AWS backend.',
     options: ['backend', 'in', 'resources'],
   },
+  'state mv': {
+    description: 'Move a resource from one pulled scope file to another, under another ID.',
+    options: ['in', 'out', 'from', 'to'],
+  },
 };
-// Commands that read a production backend instead of a project.
-const BACKEND_COMMANDS = new Set(['status', 'unfinished', 'state pull', 'state push']);
+// Commands that read no project: they read a production backend or the files of state pull.
+const BACKEND_COMMANDS = new Set(['status', 'unfinished', 'state pull', 'state push', 'state mv']);
 const OPTION_HELP = {
   value: 'Value name for impact',
   out: 'Output path',
@@ -187,6 +193,8 @@ const OPTION_HELP = {
   in: 'File written by state pull',
   resources:
     'Comma-separated state resources to push (default: all; the whole journal is always pushed)',
+  from: 'Resource ID in the --in file, for example contract:registry',
+  to: 'Resource ID that the resource gets in the --out file',
   parallel: 'Use eligible deployers concurrently (default: serial)',
   pipeline: 'Use a nonce-pinned pipeline plan',
   var: 'Set a declared variable, name=value; repeatable, and the last one wins',
@@ -220,6 +228,8 @@ const VALUE_OPTIONS = new Set([
   'workspace',
   'in',
   'resources',
+  'from',
+  'to',
 ]);
 const REPEATABLE_OPTIONS = new Set(['var', 'var-file']);
 const BOOLEAN_OPTIONS = new Set([
@@ -256,13 +266,17 @@ export function usage(command?: CommandName): string {
         ? 'File for the unfinished saved plan; not written when no plan is unfinished'
         : name === 'out' && command === 'state pull'
           ? 'File for the pulled scope'
-          : name === 'out'
-            ? 'Adapter directory (default: ./generated)'
-            : name === 'plan' && command === 'apply'
-              ? 'Saved plan file; omit to create and approve a fresh plan'
-              : name === 'plan' && command === 'status'
-                ? 'Saved plan file (default: ./plan.json)'
-                : OPTION_HELP[name];
+          : name === 'out' && command === 'state mv'
+            ? 'Pulled scope file that receives the resource; created when absent'
+            : name === 'in' && command === 'state mv'
+              ? 'Pulled scope file that has the resource; written again without it'
+              : name === 'out'
+                ? 'Adapter directory (default: ./generated)'
+                : name === 'plan' && command === 'apply'
+                  ? 'Saved plan file; omit to create and approve a fresh plan'
+                  : name === 'plan' && command === 'status'
+                    ? 'Saved plan file (default: ./plan.json)'
+                    : OPTION_HELP[name];
   const environment =
     command === 'apply'
       ? '\n\nRequires ETH_RPC_URL. ETH_VERIFICATION_RPC_URL optionally selects an independent deployment-verification RPC.'
@@ -325,6 +339,10 @@ export function validateOptions(command: CommandName, options: CliOptions): void
     throw new UsageError('state pull needs --backend file.json and --out file.json.');
   if (command === 'state push' && (!options.backend || !options.in))
     throw new UsageError('state push needs --backend file.json and --in file.json.');
+  if (command === 'state mv' && !(options.in && options.out && options.from && options.to))
+    throw new UsageError(
+      'state mv needs --in file.json, --out file.json, --from <resource> and --to <resource>.',
+    );
   for (const assignment of options.var ?? []) {
     if (!/^[a-z][a-zA-Z0-9_]*=/.test(assignment))
       throw new UsageError(`--var ${assignment} must be name=value, for example --var owner=0x….`);

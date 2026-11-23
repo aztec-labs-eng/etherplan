@@ -3,11 +3,15 @@ import test from 'node:test';
 import { getContractAddress, keccak256 } from 'viem';
 import { applyPlan } from '../src/execution/index.ts';
 import { acquireLeases, readStoredJournal, scopeKey } from '../src/execution/backends.ts';
-import { pullDeploymentScope, pushDeploymentScope } from '../src/execution/scope-transfer.ts';
+import {
+  moveScopeResource,
+  pullDeploymentScope,
+  pushDeploymentScope,
+} from '../src/execution/scope-transfer.ts';
 import { hashJson } from '../src/identity.ts';
 import { createPlan, prepareResources } from '../src/planning/index.ts';
 import { graph, parseSpec } from '../src/spec/index.ts';
-import { deployerA, startAnvil } from './execution/chain.ts';
+import { deployerA, fixtureMany, startAnvil } from './execution/chain.ts';
 import { memoryBackend } from './execution/memory-backend.ts';
 
 // Same constructor-creates-a-child artifact as pinned-runtime.test.ts.
@@ -489,6 +493,96 @@ test('state push of a hand-repaired journal that signs one transaction under two
       rows.map((row) => [row.actionId, row.transactionHash]),
       [['contract:parent', signed[0].transactionHash.toLowerCase()]],
     );
+  } finally {
+    await ws.chain.stop();
+  }
+});
+
+test('state mv moves the records of two unit scopes into one root scope that plans reuse', async () => {
+  const ws = await setup();
+  try {
+    // Unit A holds the pinned-runtime parent. Unit B holds a plain contract, which has a replay proof.
+    const plain = fixtureMany(1);
+    const unitB = {
+      scope: { ...ws.scope, project: 'bridge', environment: 'v6-staging__brg-v6' },
+      spec: { ...ws.spec, contracts: plain.spec.contracts },
+      artifacts: plain.artifacts,
+    };
+    const legacy = memoryBackend(ws.scope);
+    assert.equal((await ws.apply(legacy, await createPlan(ws.input))).status, 'applied');
+    const planB = await createPlan({ ...ws.input, spec: unitB.spec, artifacts: unitB.artifacts });
+    assert.equal((await ws.apply(legacy, planB, unitB)).status, 'applied');
+
+    // The root declares both contracts with other resource IDs.
+    const rootScope = { ...ws.scope, project: 'deployment', environment: 'v6-staging__dep-v6' };
+    const spec = {
+      ...ws.spec,
+      contracts: [
+        { ...ws.spec.contracts[0], id: 'rootParent' },
+        { ...plain.spec.contracts[0], id: 'rootHolder' },
+      ],
+    };
+    const artifacts = new Map([
+      ['rootParent', artifact],
+      ['rootHolder', plain.artifacts.get('holder00')],
+    ]);
+    const input = { ...ws.input, spec, artifacts };
+    const actions = (plan) =>
+      plan.resources.map((r) => [r.id, r.action, r.observation.creationProof?.method]);
+    const reused = [
+      ['contract:rootParent', 'reuse', 'pinned-runtime'],
+      ['contract:rootHolder', 'reuse', undefined],
+    ];
+
+    const pull = async (scope) =>
+      throughFile(await pullDeploymentScope({ backend: legacy, scope }));
+    let root = moveScopeResource({
+      from: await pull(ws.scope),
+      source: 'contract:parent',
+      destination: 'contract:rootParent',
+    }).to;
+    root = moveScopeResource({
+      from: await pull(unitB.scope),
+      to: root,
+      source: 'contract:holder00',
+      destination: 'contract:rootHolder',
+    }).to;
+    const target = memoryBackend(rootScope);
+    await pushDeploymentScope({ backend: target, pulled: throughFile(root), scope: rootScope });
+    const read = async (backend = target) => ({
+      state: (await backend.stateStore.read(rootScope)).value,
+      journalRecords: await readStoredJournal(backend.journalStore, rootScope),
+    });
+    assert.deepEqual(actions(await createPlan({ ...input, ...(await read()) })), reused);
+
+    // The replay proof needs only the renamed state record. The pinned-runtime proof needs the moved journal records.
+    const stateOnly = await createPlan({ ...input, state: (await read()).state });
+    assert.deepEqual(
+      stateOnly.resources.map((r) => r.action),
+      ['unverified', 'reuse'],
+    );
+
+    // An apply in the root extends its journal and writes its state. The moved evidence stays valid.
+    spec.contracts.push({
+      id: 'parent2',
+      artifact: 'Parent.json',
+      salt: `0x${'38'.repeat(32)}`,
+      args: [],
+    });
+    artifacts.set('parent2', artifact);
+    pinned(spec, artifacts, 'parent2');
+    const grow = await createPlan({ ...input, ...(await read()) });
+    const applied = await ws.apply(target, grow, { spec, artifacts, scope: rootScope });
+    assert.equal(applied.status, 'applied');
+    assert.equal(applied.transactionsSigned, 1);
+    const grown = [...reused, ['contract:parent2', 'reuse', 'pinned-runtime']];
+    assert.deepEqual(actions(await createPlan({ ...input, ...(await read()) })), grown);
+
+    // The root scope holds all its evidence: a pull and a push into another backend keep the reuse.
+    const third = memoryBackend(rootScope);
+    const pulledRoot = await pullDeploymentScope({ backend: target, scope: rootScope });
+    await pushDeploymentScope({ backend: third, pulled: throughFile(pulledRoot) });
+    assert.deepEqual(actions(await createPlan({ ...input, ...(await read(third)) })), grown);
   } finally {
     await ws.chain.stop();
   }

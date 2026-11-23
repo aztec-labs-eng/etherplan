@@ -42,6 +42,7 @@ test('the CLI exposes its version and command help without a spec or RPC', () =>
     'unfinished',
     'state pull',
     'state push',
+    'state mv',
   ]) {
     assert.match(overview.stdout, new RegExp(`\\b${command}\\b`));
     const help = cli(...command.split(' '), '--help');

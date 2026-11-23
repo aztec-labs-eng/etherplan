@@ -127,6 +127,8 @@ function recordInput(
 
 /** Reports a durable record and runs its hook. */
 async function announce(ctx: ApplyContext, record: JournalRecord, started: number): Promise<void> {
+  // Only `state mv` writes a moved record, so an apply has none to report.
+  if (record.phase === 'moved') return;
   await report(ctx, record.phase === 'failed' ? 'terminal-failure' : record.phase, {
     actionId: record.actionId,
     sequence: record.sequence,

@@ -55,4 +55,33 @@ Each command prints a JSON report: the scope key, the record count, the signed r
 
 Push can't see the source, so a deploy in the source after the pull never reaches the target. Freeze deploys in the source from the pull onward, and stop planning the scope there once the push succeeds. Both backends then hold the same signer history, and two backends that sign with one key can both use a nonce. See [AWS permissions](permissions.md) for what each side needs.
 
+## Move resources between scopes with state mv
+
+`state mv` moves one resource from one pulled scope file to another and gives it another resource ID. It works like Terraform's `state mv` between two state files. Use it to bring the resources of several scopes into one scope, for example when one root project takes over the contracts of several projects.
+
+```sh
+etherplan state pull --backend unit-backend.json --out unit.json
+etherplan state mv --in unit.json --out root.json --from contract:registry --to contract:module1_4_unit_registry
+etherplan state push --backend root-backend.json --in root.json
+```
+
+It reads no backend and no chain. It reads and writes only the two files. Run it one time for each resource.
+
+- State goes to state. The state record leaves the `--in` file and goes into the `--out` file under the `--to` ID. The record itself does not change.
+- Journal goes to journal. Each journal record of that resource goes into the journal of the `--out` file as a `moved` record. A `moved` record holds the old record, unchanged, and the scope and the resource ID that it had. The journal of the `--in` file does not change, because its hash chain can't be cut.
+- The saved plans that those journal records name go along.
+
+`state mv` makes the `--out` file when it is absent. The new file has the scope names and the chain of the `--in` file. `state push` ignores those names: it writes into the scope of its backend file.
+
+A plan in the target reuses a moved contract. A replay proof needs only the state record. A pinned-runtime proof also needs its journal records, and its commitment includes the resource ID that the contract had. The plan finds both in the `moved` records. The scope then holds all its evidence, so a later `state pull` and `state push` move it complete, and the source backend is not needed again.
+
+`state mv` refuses when:
+
+- the `--in` journal fails the hash-chain check.
+- the `--in` file doesn't have the `--from` resource, or the `--out` file already has the `--to` resource.
+- the two files name different chains.
+- the record isn't valid under the `--to` ID, for example a contract record under a call ID.
+
+It doesn't check the target project. Move only the resources that the target project declares: a module root stops on a contract in its state that it doesn't declare. `state mv` writes no signer-index rows, so move a resource only after its transactions have the confirmation depth that your applies use.
+
 [Previous: AWS CLI setup](aws-cli.md) · [Next: KMS transaction signers](kms-signers.md)

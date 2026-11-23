@@ -20,6 +20,7 @@ Part of [CLI reference](index.md).
 | `unfinished` | Yes | No | The saved plan that an interrupted AWS apply must resume. |
 | `state pull` | Yes | No | A file holding one settled AWS deployment scope. |
 | `state push` | Yes | No | A pulled scope written into an empty AWS scope. |
+| `state mv` | No | No | A resource moved from one pulled scope file to another, under another ID. |
 
 `graph`, `impact`, and `compile` check structure without loading artifacts. `validate` and `adapters` also load artifacts and ABIs. Live commands check all of those plus the chain. `output` reports saved addresses, so use `verify` when you need a current on-chain check. `import` updates local state but does not broadcast a transaction.
 
