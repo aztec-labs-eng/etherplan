@@ -1,4 +1,4 @@
-import { canonicalJson } from './identity.ts';
+import { canonicalJson, jsonSafe } from './identity.ts';
 import { pinnedJournalCommitment, samePinnedCommitments } from './verification/pinned-runtime.ts';
 import type { PreparedContract } from './planning/types.ts';
 import type { ChainIdentity } from './types.ts';
@@ -104,5 +104,5 @@ export function sameRecoveryProof(
   left: CreationProof | null | undefined,
   right: CreationProof | null | undefined,
 ): boolean {
-  return Boolean(left && right && canonicalJson(left) === canonicalJson(right));
+  return Boolean(left && right && canonicalJson(jsonSafe(left)) === canonicalJson(jsonSafe(right)));
 }
