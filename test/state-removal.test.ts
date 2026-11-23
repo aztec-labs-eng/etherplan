@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { applyPlan } from '../src/execution/index.ts';
 import { deploymentScope, readStoredJournal } from '../src/execution/backends.ts';
+import { pullDeploymentScope, pushDeploymentScope } from '../src/execution/scope-transfer.ts';
 import { removeFromStoredState } from '../src/execution/state-removal.ts';
 import { createPlan } from '../src/planning/index.ts';
-import { deployerA, fixture, startAnvil } from './execution/chain.ts';
+import { deployerA, fixture, owner, startAnvil } from './execution/chain.ts';
 import { memoryBackend } from './execution/memory-backend.ts';
 
 const maxSpendWei = '100000000000000000000';
@@ -38,7 +39,7 @@ async function setup() {
       client: chain.client,
       state,
       journalRecords,
-      signers: { deployers: [deployerA.address] },
+      signers: { deployers: [deployerA.address], owner: owner.address },
       maxSpendWei,
     });
   const apply = async (input, hooks) =>
@@ -50,7 +51,7 @@ async function setup() {
         await readStoredJournal(backend.journalStore, scope),
       ),
       client: chain.client,
-      signers: { deployer: [deployerA] },
+      signers: { deployer: [deployerA], owner },
       ...backend,
       scope,
       confirmations: 1,
@@ -131,6 +132,54 @@ test('state rm refuses a declared resource, a missing state and an unresolved tr
       /has an unresolved transaction for contract:beta\. Resume it with apply/,
     );
     assert.deepEqual(await ws.backend.stateStore.read(ws.scope), before);
+  } finally {
+    await ws.chain.stop();
+  }
+});
+
+test('state rm of a contract also removes its calls, but not a call that the project declares', async () => {
+  const ws = await setup();
+  try {
+    // The owner call bindGamma of the fixture has the registry as its target.
+    assert.equal((await ws.apply(fixture())).status, 'applied');
+    const other = memoryBackend(ws.scope);
+    await pushDeploymentScope({
+      backend: other,
+      pulled: await pullDeploymentScope({ backend: ws.backend, scope: ws.scope }),
+    });
+    const kept = withContracts(['alpha', 'beta', 'gamma']);
+    const remove = (backend, declared) =>
+      removeFromStoredState({ backend, scope: ws.scope, ids: ['contract:registry'], declared });
+    const resources = async (backend) =>
+      Object.keys((await backend.stateStore.read(ws.scope)).value.resources).sort();
+
+    // The project has no registry and no call on it.
+    const { removed } = await remove(ws.backend, declaredBy(kept.spec));
+    assert.deepEqual(removed, ['contract:registry', 'call:bindGamma']);
+    assert.deepEqual(await resources(ws.backend), [
+      'contract:alpha',
+      'contract:beta',
+      'contract:gamma',
+    ]);
+    const plan = await ws.plan(
+      kept,
+      (await ws.backend.stateStore.read(ws.scope)).value,
+      await readStoredJournal(ws.backend.journalStore, ws.scope),
+    );
+    assert.deepEqual(
+      plan.resources.map((resource) => resource.action),
+      ['reuse', 'reuse', 'reuse'],
+    );
+
+    // The project still declares the call, as a root does that calls the contract through an external.
+    const declared = new Set([...declaredBy(kept.spec), 'call:bindGamma']);
+    assert.deepEqual((await remove(other, declared)).removed, ['contract:registry']);
+    assert.deepEqual(await resources(other), [
+      'call:bindGamma',
+      'contract:alpha',
+      'contract:beta',
+      'contract:gamma',
+    ]);
   } finally {
     await ws.chain.stop();
   }

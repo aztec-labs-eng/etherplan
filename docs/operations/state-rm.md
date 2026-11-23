@@ -19,6 +19,8 @@ Without `--backend`, it edits the local state file, as `plan` and `apply` would 
 
 Name every resource by its ID, separated by commas. Every resource of one module instance shares the instance's prefix, such as `module1_5_moved_`. The resources include calls and externals, which the planning error doesn't list, so read the state's `resources` for the complete list.
 
+With a contract, `state rm` also removes its calls: each call record on the address of that contract, which is a call on the contract or the call that created it. It keeps a call that the project still declares, because a root can call a contract that it no longer owns. The report lists the calls that it removed. It removes no other record that you didn't name: name each external, and each call that has another target.
+
 `state rm` changes nothing when one of these is true:
 
 - The project still declares a named resource. The next plan would deploy or call it again, so remove it from the project first.

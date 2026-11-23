@@ -25,17 +25,17 @@ export async function stateRm({
     const id = await client.getChainId();
     const genesis = await client.getBlock({ blockNumber: 0n });
     const backend = await backendFromFile(options.backend, { id, genesisHash: genesis.hash });
-    await removeFromStoredState({
+    const { removed } = await removeFromStoredState({
       backend,
       scope: backend.scope,
       ids,
       declared,
       ...(backend.ttlMs ? { ttlMs: backend.ttlMs } : {}),
     });
-    print({ status: 'removed', removed: ids, scope: backend.scope });
+    print({ status: 'removed', removed, scope: backend.scope });
     return;
   }
   const journalFile = path.resolve(options.journal ?? defaultJournalFile(stateFile));
-  await removeFromLocalState({ stateFile, journalFile, ids, declared });
-  print({ status: 'removed', removed: ids, stateFile });
+  const { removed } = await removeFromLocalState({ stateFile, journalFile, ids, declared });
+  print({ status: 'removed', removed, stateFile });
 }

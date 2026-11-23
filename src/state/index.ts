@@ -523,6 +523,31 @@ function mergeTransactions(previous: Hash[] = [], current: Hash[] = []): Hash[] 
  * The state without the named resources, as Terraform's `state rm` leaves it: each contract stays on chain and the
  * journal keeps its records. The result has no lastPlanHash, so no plan made before the removal applies over it.
  */
+/**
+ * The call records that go with the named contracts: each call in the state on the address of a named contract. That
+ * is a call on the contract, or the call that created it. A call that the project declares stays out, because a root
+ * can still call a contract that it no longer owns.
+ */
+export function callsOfContracts(
+  state: StateFile,
+  ids: string[],
+  declared: ReadonlySet<string>,
+): string[] {
+  const resources: Record<string, StateResource> = state.resources;
+  const addresses = new Set(
+    ids.flatMap((id) =>
+      id.startsWith('contract:') && resources[id] ? [resources[id].address.toLowerCase()] : [],
+    ),
+  );
+  return Object.keys(resources).filter(
+    (id) =>
+      id.startsWith('call:') &&
+      !ids.includes(id) &&
+      !declared.has(id) &&
+      addresses.has(resources[id]!.address.toLowerCase()),
+  );
+}
+
 export function removeResources(stateInput: StateFile, ids: string[]): StateFile {
   const state = validateState(stateInput);
   assert(ids.length > 0, 'Name at least one resource to remove.');

@@ -1,5 +1,11 @@
 import { zeroAddress } from 'viem';
-import { readState, removeResources, validateState, writeStateAtomic } from '../state/index.ts';
+import {
+  callsOfContracts,
+  readState,
+  removeResources,
+  validateState,
+  writeStateAtomic,
+} from '../state/index.ts';
 import type { StateFile } from '../state/types.ts';
 import type { Address } from '../types.ts';
 import { acquireLeases, readStoredJournal } from './backends.ts';
@@ -14,12 +20,18 @@ export interface StateRemovalInput {
   declared: ReadonlySet<string>;
 }
 
+export interface StateRemoval {
+  state: StateFile;
+  /** The named resources, then the calls of the named contracts that the project does not declare. */
+  removed: string[];
+}
+
 function removal(
   state: StateFile | null,
   records: JournalRecord[],
   { ids, declared }: StateRemovalInput,
   where: string,
-): StateFile {
+): StateRemoval {
   if (!state) throw new Error(`${where} has no state.`);
   const kept = ids.filter((id) => declared.has(id));
   if (kept.length)
@@ -31,18 +43,19 @@ function removal(
     throw new Error(
       `Plan ${live[0]!.latest.planHash} has an unresolved transaction for ${live.map(({ latest }) => latest.actionId).join(', ')}. Resume it with apply before changing state.`,
     );
-  return removeResources(state, ids);
+  const removed = [...ids, ...callsOfContracts(state, ids, declared)];
+  return { state: removeResources(state, removed), removed };
 }
 
 /**
- * Removes resources from a local state file, as Terraform's `state rm` does. It holds the state lock that apply
- * holds, sends nothing and leaves the journal whole.
+ * Removes resources from a local state file, as Terraform's `state rm` does. With a contract go its calls that the
+ * project does not declare. It holds the state lock that apply holds, sends nothing and leaves the journal whole.
  */
 export async function removeFromLocalState({
   stateFile,
   journalFile,
   ...input
-}: StateRemovalInput & { stateFile: string; journalFile: string }): Promise<StateFile> {
+}: StateRemovalInput & { stateFile: string; journalFile: string }): Promise<StateRemoval> {
   const lock = await acquireLock(`${await canonicalLocalFile(stateFile)}.lock`, { planHash: null });
   try {
     let records: JournalRecord[] = [];
@@ -51,10 +64,10 @@ export async function removeFromLocalState({
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    const state = removal(await readState(stateFile), records, input, stateFile);
+    const removed = removal(await readState(stateFile), records, input, stateFile);
     await lock.assertHeld();
-    await writeStateAtomic(stateFile, state);
-    return state;
+    await writeStateAtomic(stateFile, removed.state);
+    return removed;
   } finally {
     await lock.release();
   }
@@ -74,7 +87,7 @@ export async function removeFromStoredState({
   backend: Pick<AwsBackend, 'stateStore' | 'journalStore' | 'lockProvider'>;
   scope: DeploymentScope;
   ttlMs?: number;
-}): Promise<StateFile> {
+}): Promise<StateRemoval> {
   const signers = [
     ...new Set(
       (await readStoredJournal(backend.journalStore, scope)).flatMap((record) =>
@@ -92,15 +105,17 @@ export async function removeFromStoredState({
   try {
     const records = await readStoredJournal(backend.journalStore, scope);
     const stored = await backend.stateStore.read(scope);
-    const state = removal(
+    const removed = removal(
       stored ? validateState(stored.value) : null,
       records as unknown as JournalRecord[],
       input,
       'The backend scope',
     );
     await leases.assertHeld();
-    await backend.stateStore.compareAndSwap(scope, stored!.version, state, { fence: leases.fence });
-    return state;
+    await backend.stateStore.compareAndSwap(scope, stored!.version, removed.state, {
+      fence: leases.fence,
+    });
+    return removed;
   } finally {
     await leases.release();
   }
