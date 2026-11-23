@@ -142,6 +142,25 @@ test('verify and plan reports preserve resource outcomes, warnings and failure r
   assert.match(report, /Plan blocked: 1 reuse, 1 conflict, 1 unverified resource/);
   proposed.resources = [plan.resources[0]];
   assert.match(formatPlanReport(proposed, 'bridge', 'local'), /no changes; 1 resource reused/);
+  proposed.resources = [
+    {
+      id: 'contract:vault',
+      address,
+      action: 'deploy',
+      observation: {
+        ...observation('absent'),
+        stateComparison: {
+          replacement: true,
+          previousAddress: address,
+          saltChange: { reason: 'The mixer changed from "a" to "b".' },
+        },
+      },
+    },
+  ] as unknown as Plan['resources'];
+  assert.match(
+    formatPlanReport(proposed, 'bridge', 'local'),
+    /DEPLOY at 0x[^\n]+\n    Replaces 0x[^\n]+\n    The mixer changed from "a" to "b"\./,
+  );
 });
 
 test('plan reports count verify actions without treating them as deployments or no changes', () => {

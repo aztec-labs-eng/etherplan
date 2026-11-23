@@ -249,9 +249,9 @@ function saltChange(
 }
 
 // Deployment identity is the address, initcode, constructor inputs, and generation; the artifact hash is provenance.
-// Both address and deployment identity changing is a replacement; only one changing is a conflict. An artifact-only
-// change is drift. A raised generation moves the derived salt, so it replaces an unchanged contract on purpose; a
-// lowered one is a conflict, because its earlier address may already hold code.
+// A changed address is a replacement when the deployment identity or the salt changed with it; any other one-sided
+// change is a conflict. An artifact-only change is drift. A raised generation moves the derived salt, so it replaces an
+// unchanged contract on purpose; a lowered one is a conflict, because its earlier address may already hold code.
 function compareState(
   resource: PreparedResource,
   state: StateFile | null,
@@ -268,6 +268,11 @@ function compareState(
     lower(record.inputsHash) === lower(resource.inputsHash) &&
     previousGeneration === generation;
   const artifactMatches = lower(record.artifactHash) === lower(resource.artifactHash);
+  const change = saltChange(resource, record);
+  // An adopted contract has no salt, so its changed address stays a conflict.
+  const resalted = Boolean(change?.previousSalt && change.salt);
+  const replacement =
+    !addressMatches && (!identityMatches || resalted) && generation >= previousGeneration;
   const comparison: StateComparison = {
     previousAddress: record.address,
     previousIdentity: {
@@ -279,8 +284,8 @@ function compareState(
     addressMatches,
     identityMatches,
     artifactMatches,
-    replacement: !addressMatches && !identityMatches && generation >= previousGeneration,
-    conflict: addressMatches !== identityMatches || generation < previousGeneration,
+    replacement,
+    conflict: addressMatches ? !identityMatches : !replacement,
     liveCodeMatchesState:
       record.codeHash === null ||
       record.codeHash === undefined ||
@@ -290,7 +295,6 @@ function compareState(
     comparison.artifactDrift = artifactDrift(resource, record, verification);
     comparison.conflict = !comparison.artifactDrift.accepted;
   }
-  const change = saltChange(resource, record);
   if (change) comparison.saltChange = change;
   return comparison;
 }

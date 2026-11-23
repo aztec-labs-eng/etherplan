@@ -127,8 +127,11 @@ export function formatPlanReport(plan: Plan, project: string, workspace: string)
     lines.push(
       `  ${moduleResourceLabel(plan.modules, resource.id)}: ${resource.action.toUpperCase()} at ${resource.address}${call}`,
     );
-    if (resource.observation?.stateComparison?.replacement)
-      lines.push(`    Replaces ${resource.observation.stateComparison.previousAddress}.`);
+    const comparison = resource.observation?.stateComparison;
+    if (comparison?.replacement) {
+      lines.push(`    Replaces ${comparison.previousAddress}.`);
+      if (comparison.saltChange) lines.push(`    ${comparison.saltChange.reason}`);
+    }
     if (resource.action === 'conflict' || resource.action === 'unverified') {
       const reasons = new Set([
         ...resource.observation.reasons,

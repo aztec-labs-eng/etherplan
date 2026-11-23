@@ -169,7 +169,7 @@ export interface SaltChange {
   reason: string;
 }
 
-/** How a contract compares with its state record. Address and deployment identity both changing is a replacement. */
+/** How a contract compares with its state record. A changed address is a replacement when the identity or the salt changed with it. */
 export interface StateComparison {
   previousAddress: Address;
   previousIdentity: {

@@ -458,7 +458,8 @@ test('artifact drift stays blocked for changed live code, runtime, checks, missi
     client,
     state,
   });
-  assert.equal(resalted.action, 'conflict');
+  assert.equal(resalted.action, 'deploy');
+  assert.equal(resalted.observation.stateComparison.replacement, true);
   assert.equal(resalted.observation.stateComparison.artifactDrift, undefined);
   const reinput = await planVault({
     spec: importSpec({ destination: `0x${'02'.repeat(32)}` }),
