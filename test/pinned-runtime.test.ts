@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { getContractAddress, keccak256 } from 'viem';
 import { applyPlan, readLocalJournal } from '../src/execution/index.ts';
+import { loadDependencies } from '../src/execution/dependencies.ts';
 import { readStoredJournal } from '../src/execution/backends.ts';
 import { hashJson } from '../src/identity.ts';
 import { compileSpec } from '../src/input/compile.ts';
@@ -370,7 +371,22 @@ test('saved pinned proof fails when child runtime changes after deployment', asy
     await ws.apply(plan);
     const state = await readState(ws.stateFile);
     const records = await readLocalJournal(ws.journalFile);
+    const resource = prepareResources(ws.spec, graph(parseSpec(ws.spec)), ws.artifacts)
+      .resources[0];
+    const options = {
+      creationProof: state.resources['contract:parent'].creationProof,
+      journalRecords: records,
+    };
+    const verify = loadDependencies().verifyResource;
+    assert.equal((await verify(resource, ws.chain.client, options)).status, 'verified');
+    const getTransaction = ws.chain.client.getTransaction;
+    ws.chain.client.getTransaction = async () => {
+      throw new Error('history unavailable');
+    };
+    assert.equal((await verify(resource, ws.chain.client, options)).status, 'verified');
     await ws.chain.rpc('anvil_setCode', [ws.childAddress, '0x6001']);
+    assert.equal((await verify(resource, ws.chain.client, options)).status, 'unverified');
+    ws.chain.client.getTransaction = getTransaction;
     const drifted = await createPlan({ ...ws.input, state, journalRecords: records });
     assert.equal(drifted.resources[0].action, 'unverified');
     assert.equal(drifted.resources[0].observation.creationProof, undefined);

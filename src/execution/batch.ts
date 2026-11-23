@@ -9,9 +9,9 @@ import {
 } from './transactions.ts';
 import { safeExternalError, safeRpcMessage } from './rpc-error.ts';
 import { ApplyError } from './errors.ts';
-import { signerFor, transactionFor } from './shared.ts';
+import { settleBounded, signerFor, transactionFor } from './shared.ts';
 import { decide, checkExecutionDependencies, finish } from './outcome.ts';
-import { append, fail } from './report.ts';
+import { append, fail, timed } from './report.ts';
 import { assertPinnedAbsent, pinnedIntentFields } from '../verification/pinned-runtime.ts';
 import { checkReplayCapabilities } from './preflight.ts';
 import { assertSignerHistory, recordReceipt, send, signWithLease } from './settlement.ts';
@@ -28,10 +28,14 @@ import type {
   TransactionEnvelope,
 } from './types.ts';
 
-export async function prepareBatch(
+/** The gas estimates of one group that are in flight together. */
+const ESTIMATE_CONCURRENCY = 8;
+
+/** The actions of a batch that still need a transaction, each with its signer. */
+async function candidatesOf(
   ctx: ApplyContext,
   batch: ScheduleEntry[],
-): Promise<FundedJob[]> {
+): Promise<{ item: PreparedAction; entry: ScheduleEntry; signer: SignerAccount }[]> {
   const candidates: { item: PreparedAction; entry: ScheduleEntry; signer: SignerAccount }[] = [];
   for (const entry of batch) {
     const item = ctx.prepared.get(entry.id);
@@ -48,31 +52,50 @@ export async function prepareBatch(
       candidates.push({ item, entry, signer });
     }
   }
+  return candidates;
+}
+
+export async function prepareBatch(
+  ctx: ApplyContext,
+  batch: ScheduleEntry[],
+  wave?: number,
+): Promise<FundedJob[]> {
+  const candidates = await timed(ctx, 'decide', () => candidatesOf(ctx, batch), wave);
   if (candidates.length === 0) return [];
 
-  const fees = await feesFor(ctx.client, ctx.config.fees, ctx.config.baseFeeMultiplier);
+  const transactions = candidates.map((job) => transactionFor(job.item));
+  // The candidates are independent, so their estimates run together and the transport can send
+  // them in one HTTP batch. Each result keeps the position of its candidate.
+  const [fees, estimates] = await timed(
+    ctx,
+    'estimate',
+    async () =>
+      [
+        await feesFor(ctx.client, ctx.config.fees, ctx.config.baseFeeMultiplier),
+        await settleBounded(
+          candidates.map((job, index) => ({ from: job.signer.address, tx: transactions[index]! })),
+          ESTIMATE_CONCURRENCY,
+          (request) =>
+            estimateGasLimit(ctx.client, { ...request, gasMultiplier: ctx.config.gasMultiplier }),
+        ),
+      ] as const,
+    wave,
+  );
   const work: FundedJob[] = [];
-  for (const job of candidates) {
-    const tx = transactionFor(job.item);
-    let gas: bigint;
-    try {
-      gas = await estimateGasLimit(ctx.client, {
-        from: job.signer.address,
-        tx,
-        gasMultiplier: ctx.config.gasMultiplier,
-      });
-    } catch {
+  for (const [index, job] of candidates.entries()) {
+    const estimate = estimates[index];
+    if (estimate?.status !== 'fulfilled')
       return fail(ctx, job.item, 'estimate-failed', safeRpcMessage('request-failed', 'estimate'), {
         retryable: true,
         signer: job.signer.address,
       });
-    }
+    const tx = transactions[index]!;
     const envelope: CostEnvelope = {
       chainId: ctx.plan.chain.id,
       to: tx.to,
       data: tx.data,
       value: BigInt(tx.value),
-      gas,
+      gas: estimate.value,
       ...fees,
     };
     work.push({ ...job, envelope, cost: maximumCost(envelope as TransactionEnvelope) });

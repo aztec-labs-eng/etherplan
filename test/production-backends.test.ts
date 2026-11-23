@@ -83,6 +83,206 @@ test('a signer lease blocks another label and old fencing tokens cannot write', 
   }
 });
 
+test('a queued remote append checks its lease when it runs, not when it was requested', async () => {
+  const backend = memoryBackend();
+  const leases = await acquireLeases({
+    lockProvider: backend.lockProvider,
+    scope,
+    addresses: [deployerA.address],
+    planHash,
+    principal: 'runner-a',
+  });
+  let lost = false;
+  let firstWriteStored;
+  let finishFirstWrite;
+  const stored = new Promise((resolve) => (firstWriteStored = resolve));
+  const finish = new Promise((resolve) => (finishFirstWrite = resolve));
+  try {
+    const journal = await openStoredJournal({
+      ...backend,
+      journalStore: {
+        ...backend.journalStore,
+        async append(...args) {
+          await backend.journalStore.append(...args);
+          firstWriteStored();
+          await finish;
+        },
+      },
+      scope,
+      fence: leases.fence,
+      async assertHeld() {
+        if (lost) throw Object.assign(new Error('Writer lease is lost.'), { code: 'lease-lost' });
+      },
+    });
+    const intent = (actionId) =>
+      journal.append({
+        planHash,
+        chain: chainIdentity,
+        actionId,
+        phase: 'intent',
+        signer: deployerA.address,
+        nonce: '0',
+        principal: 'runner-a',
+      });
+    const first = intent('contract:alpha');
+    const queued = intent('contract:beta');
+    await stored;
+    lost = true;
+    finishFirstWrite();
+    await first;
+    await assert.rejects(queued, { code: 'lease-lost' });
+    assert.deepEqual(
+      backend.records.map((record) => record.actionId),
+      ['contract:alpha'],
+    );
+  } finally {
+    await leases.release();
+  }
+});
+
+test('a rejected stored append writes nothing and keeps the journal position', async () => {
+  const backend = memoryBackend();
+  const leases = await acquireLeases({
+    lockProvider: backend.lockProvider,
+    scope,
+    addresses: [deployerA.address],
+    planHash,
+    principal: 'runner-a',
+  });
+  let writes = 0;
+  let storeFails = false;
+  const stored = {
+    ...backend,
+    journalStore: {
+      ...backend.journalStore,
+      async append(...args) {
+        writes++;
+        if (storeFails) throw new Error('store unavailable');
+        return backend.journalStore.append(...args);
+      },
+    },
+    scope,
+    fence: leases.fence,
+    assertHeld: async () => {},
+  };
+  const intent = {
+    planHash,
+    chain: chainIdentity,
+    actionId: 'contract:alpha',
+    phase: 'intent',
+    signer: deployerA.address,
+    nonce: '0',
+    principal: 'runner-a',
+  };
+  try {
+    const journal = await openStoredJournal(stored);
+    const first = await journal.append(intent);
+    await assert.rejects(journal.append({ ...intent, principal: '' }), /lacks audit metadata/);
+    await assert.rejects(journal.append({ ...intent, phase: 'unknown' }), /invalid identity/);
+    assert.equal(writes, 1, 'an invalid record does not reach the store');
+    storeFails = true;
+    await assert.rejects(journal.append(intent), /store unavailable/);
+    storeFails = false;
+    const second = await journal.append({ ...intent, actionId: 'contract:beta' });
+    assert.deepEqual([second.sequence, second.previousHash], [2, first.recordHash]);
+    assert.deepEqual(
+      journal.records.map((record) => record.actionId),
+      ['contract:alpha', 'contract:beta'],
+    );
+    // Opening validates the complete chain that the appends validated one record at a time.
+    assert.equal((await openStoredJournal(stored)).records.length, 2);
+  } finally {
+    await leases.release();
+  }
+});
+
+/** A store that writes at most `limit` records of a run in one write, as one atomic step. */
+function batchingStore(backend, limit) {
+  const batches = [];
+  let failAt = null;
+  return {
+    batches,
+    failOn(call) {
+      failAt = call;
+    },
+    journalStore: {
+      ...backend.journalStore,
+      async appendBatch(deployment, records, { fence }) {
+        if (batches.length + 1 === failAt) {
+          failAt = null;
+          throw new Error('store unavailable');
+        }
+        const batch = records.slice(0, limit);
+        for (const record of batch)
+          await backend.journalStore.append(deployment, record, {
+            expectedSequence: record.sequence,
+            expectedPreviousHash: record.previousHash,
+            fence,
+          });
+        batches.push(batch.map((record) => record.actionId));
+        return batch.length;
+      },
+    },
+  };
+}
+
+test('a stored journal writes a run of records in chunks that are always a valid stored prefix', async () => {
+  const backend = memoryBackend();
+  const leases = await acquireLeases({
+    lockProvider: backend.lockProvider,
+    scope,
+    addresses: [deployerA.address],
+    planHash,
+    principal: 'runner-a',
+  });
+  const store = batchingStore(backend, 2);
+  const options = { ...backend, scope, fence: leases.fence, assertHeld: async () => {} };
+  const intents = (...names) =>
+    names.map((name) => ({
+      planHash,
+      chain: chainIdentity,
+      actionId: `contract:${name}`,
+      phase: 'intent',
+      signer: deployerA.address,
+      nonce: '0',
+      principal: 'runner-a',
+    }));
+  const stored = () => backend.records.map((record) => record.actionId);
+  try {
+    assert.equal((await openStoredJournal(options)).appendAll, undefined, 'no batch support');
+    const journal = await openStoredJournal({ ...options, journalStore: store.journalStore });
+    const written = await journal.appendAll(intents('a', 'b', 'c', 'd', 'e'));
+    assert.deepEqual(store.batches, [
+      ['contract:a', 'contract:b'],
+      ['contract:c', 'contract:d'],
+      ['contract:e'],
+    ]);
+    assert.deepEqual(
+      written.map((record) => record.sequence),
+      [1, 2, 3, 4, 5],
+    );
+
+    // The second chunk of the next run fails. The first chunk stays, and the journal agrees with the store.
+    store.failOn(5);
+    await assert.rejects(journal.appendAll(intents('f', 'g', 'h')), /store unavailable/);
+    assert.deepEqual(stored().slice(5), ['contract:f', 'contract:g']);
+    assert.deepEqual(
+      journal.records.map((record) => record.actionId),
+      stored(),
+    );
+    const next = await journal.append(intents('i')[0]);
+    assert.deepEqual([next.sequence, next.previousHash], [8, backend.records[6].recordHash]);
+    await assert.rejects(
+      journal.appendAll([{ ...intents('j')[0], phase: 'signed' }]),
+      /no signed record/,
+    );
+    // Opening validates the complete chain that the chunks wrote.
+    assert.equal((await openStoredJournal(options)).records.length, 8);
+  } finally {
+    await leases.release();
+  }
+});
+
 test('stored journal detects a changed record and a missing tail', async () => {
   const backend = memoryBackend();
   const journal = await openStoredJournal({
@@ -207,6 +407,71 @@ test('AWS state and journal writes check both leases transactionally', async () 
         /#token = :token AND #holderId = :holderId AND #expiresAt > :now/,
       );
   }
+});
+
+test('AWS writes a run of records in one fenced transaction with one head update', async () => {
+  const commands = [];
+  const backend = createAwsBackend({
+    tableName: 'test',
+    kmsKeyId: 'test',
+    dynamodb: {
+      async send(command) {
+        commands.push(command);
+      },
+    },
+    kms: {},
+    s3: {},
+  });
+  const fence = ['deployment', 'signer'].map((kind, index) => ({
+    scope: { ...scope, kind, address: deployerA.address },
+    token: index + 4,
+    holderId: 'runner',
+    principal: 'test-runner',
+  }));
+  const hashOf = (sequence) => `0x${sequence.toString(16).padStart(64, '0')}`;
+  const run = (first, count) =>
+    Array.from({ length: count }, (_, index) => ({
+      sequence: first + index,
+      previousHash: first + index === 1 ? null : hashOf(first + index - 1),
+      recordHash: hashOf(first + index),
+      phase: 'intent',
+      at: new Date().toISOString(),
+    }));
+  const from = (records) => ({
+    expectedSequence: records[0].sequence,
+    expectedPreviousHash: records[0].previousHash,
+    fence,
+  });
+
+  const three = run(8, 3);
+  assert.equal(await backend.journalStore.appendBatch(scope, three, from(three)), 3);
+  const items = commands[0].input.TransactItems;
+  assert.deepEqual(
+    items.map((item) => Object.keys(item)[0]),
+    ['ConditionCheck', 'ConditionCheck', 'Update', 'Put', 'Put', 'Put'],
+  );
+  const head = items[2].Update.ExpressionAttributeValues;
+  assert.deepEqual(
+    [head[':previous'], head[':previousHash'], head[':sequence'], head[':recordHash']],
+    [7, hashOf(7), 10, hashOf(10)],
+  );
+  assert.deepEqual(
+    items.slice(3).map((item) => item.Put.Item.SK),
+    ['J#000000000008', 'J#000000000009', 'J#000000000010'],
+  );
+
+  // A transaction takes 100 actions, so a long run is stored in part, and the caller sends the rest.
+  const long = run(1, 120);
+  assert.equal(await backend.journalStore.appendBatch(scope, long, from(long)), 97);
+  assert.equal(commands[1].input.TransactItems.length, 100);
+
+  const broken = run(1, 3);
+  broken[2].previousHash = hashOf(9);
+  await assert.rejects(backend.journalStore.appendBatch(scope, broken, from(broken)), /contiguous/);
+  const signed = run(1, 2);
+  signed[1].phase = 'signed';
+  await assert.rejects(backend.journalStore.appendBatch(scope, signed, from(signed)), /signed/);
+  assert.equal(commands.length, 2, 'a rejected run sends no write');
 });
 
 test('AWS saves the signer index in the same fenced transaction as a signature', async () => {
@@ -741,8 +1006,8 @@ test('an external signer cannot change the destination before journal persistenc
   }
 });
 
-async function pipelineRun(localChain, label) {
-  const input = fixtureMany(3);
+async function pipelineRun(localChain, label, count = 3) {
+  const input = fixtureMany(count);
   const plan = await createPlan({
     ...input,
     client: localChain.client,
@@ -828,6 +1093,174 @@ test('a new runner resumes an encrypted pipeline reservation without a second si
     for (const type of ['recovery', 'broadcast-result', 'receipt-observed'])
       assert.equal(events.filter((event) => event.type === type).length, 3, type);
     assert.ok(events.every((event) => !JSON.stringify(event).includes('rawTransaction')));
+  } finally {
+    await localChain.stop();
+  }
+});
+
+test('a pipelined group signs only after its complete intent set is stored in batches', async () => {
+  const localChain = await startAnvil();
+  try {
+    const { backend, signer, options } = await pipelineRun(localChain, 'pipeline-batch');
+    const store = batchingStore(backend, 2);
+    const intentsAtFirstSignature = [];
+    const signerProvider = {
+      address: options.signerProvider.address,
+      async signTransaction(...args) {
+        intentsAtFirstSignature.push(
+          backend.recordsFor(options.scope).filter((record) => record.phase === 'intent').length,
+        );
+        return options.signerProvider.signTransaction(...args);
+      },
+    };
+    const batched = { ...options, journalStore: store.journalStore, signerProvider };
+
+    // The second chunk of the three intents fails: a partial intent group, and no signature.
+    store.failOn(2);
+    await assert.rejects(applyPlan(batched), /store unavailable/);
+    assert.equal(signer.signatures, 0);
+    assert.equal(backend.recordsFor(options.scope).length, 2);
+
+    const result = await applyPlan(batched);
+    assert.equal(result.status, 'applied');
+    assert.equal(store.batches.filter((batch) => batch.length === 2).length, 2);
+    assert.equal(intentsAtFirstSignature[0], 5, 'the abandoned intents and the complete new group');
+    assert.equal(signer.signatures, 3);
+    assert.equal(await localChain.client.getTransactionCount({ address: deployerA.address }), 3);
+  } finally {
+    await localChain.stop();
+  }
+});
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('signatures and encryptions that finish out of order keep their nonces and journal order', async () => {
+  const localChain = await startAnvil();
+  try {
+    const { plan, backend, options } = await pipelineRun(localChain, 'pipeline-overlap', 4);
+    let encryptions = 0;
+    const result = await applyPlan({
+      ...options,
+      // A later transaction is signed and encrypted sooner.
+      signerProvider: {
+        address: options.signerProvider.address,
+        async signTransaction(role, transaction) {
+          await sleep(20 * (4 - transaction.nonce));
+          return options.signerProvider.signTransaction(role, transaction);
+        },
+      },
+      journalCipher: {
+        ...backend.journalCipher,
+        async encrypt(bytes, context) {
+          encryptions++;
+          await sleep(15 * (4 - Number(context.nonce)));
+          return backend.journalCipher.encrypt(bytes, context);
+        },
+      },
+    });
+    assert.equal(result.status, 'applied');
+    const records = backend.recordsFor(options.scope);
+    const signed = records.filter((record) => record.phase === 'signed');
+    assert.deepEqual(
+      signed.map((record) => [record.actionId, record.nonce]),
+      plan.resources.map((resource, index) => [resource.id, String(index)]),
+    );
+    assert.ok(
+      signed.at(-1).sequence <
+        records.find((record) => record.phase === 'broadcast-attempt').sequence,
+      'every signed record is stored before the first broadcast',
+    );
+    assert.equal(encryptions, 4, 'each signed record is encrypted one time');
+    // A new runner decrypts each record with the context of its own transaction.
+    const reopened = await openStoredJournal({
+      ...backend,
+      scope: options.scope,
+      fence: [],
+      assertHeld: async () => {},
+    });
+    assert.equal(reopened.records.filter((record) => record.rawTransaction).length, 4);
+  } finally {
+    await localChain.stop();
+  }
+});
+
+test('a failed signature keeps the earlier signed records, and a rerun signs only the others', async () => {
+  const localChain = await startAnvil();
+  try {
+    const { plan, backend, options } = await pipelineRun(localChain, 'pipeline-sign-failure');
+    const requests = [];
+    let healthy = false;
+    const flaky = {
+      ...options,
+      signerProvider: {
+        address: options.signerProvider.address,
+        async signTransaction(role, transaction) {
+          requests.push(transaction.nonce);
+          // The second signature fails after the third one is made.
+          if (transaction.nonce === 1 && !healthy) {
+            await sleep(40);
+            throw new Error('signer unavailable');
+          }
+          return options.signerProvider.signTransaction(role, transaction);
+        },
+      },
+    };
+    let failure;
+    await applyPlan(flaky).catch((error) => (failure = error));
+    assert.equal(failure?.code, 'signer', failure?.message);
+    assert.equal(failure.actionId, plan.resources[1].id);
+    const phases = () =>
+      backend
+        .recordsFor(options.scope)
+        .filter((record) => record.phase !== 'intent')
+        .map((record) => [record.phase, record.actionId]);
+    assert.deepEqual(phases(), [['signed', plan.resources[0].id]]);
+
+    healthy = true;
+    const result = await applyPlan(flaky);
+    assert.equal(result.status, 'applied');
+    assert.equal(requests.filter((nonce) => nonce === 0).length, 1, 'no second signature');
+    assert.equal(await localChain.client.getTransactionCount({ address: deployerA.address }), 3);
+  } finally {
+    await localChain.stop();
+  }
+});
+
+test('a lease lost during signing stores no signed record and starts no other signature', async () => {
+  const localChain = await startAnvil();
+  try {
+    const { backend, signer, options } = await pipelineRun(localChain, 'pipeline-sign-lease', 10);
+    let lost = false;
+    await assert.rejects(
+      applyPlan({
+        ...options,
+        lockProvider: {
+          async acquire(...args) {
+            const lease = await backend.lockProvider.acquire(...args);
+            return {
+              ...lease,
+              async assertHeld() {
+                if (lost) throw new Error('Writer lease is lost.');
+                return lease.assertHeld();
+              },
+            };
+          },
+        },
+        signerProvider: {
+          address: options.signerProvider.address,
+          async signTransaction(...args) {
+            lost = true;
+            return options.signerProvider.signTransaction(...args);
+          },
+        },
+      }),
+      /Writer lease is lost/,
+    );
+    assert.ok(signer.signatures < 10, `${signer.signatures} signatures`);
+    assert.deepEqual(
+      [...new Set(backend.recordsFor(options.scope).map((record) => record.phase))],
+      ['intent'],
+    );
   } finally {
     await localChain.stop();
   }

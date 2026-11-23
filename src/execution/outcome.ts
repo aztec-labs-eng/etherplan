@@ -11,13 +11,14 @@ import {
 import type { ReceiptRetryOptions } from './transactions.ts';
 import { ApplyError } from './errors.ts';
 import { isRpcError } from './rpc-error.ts';
-import { pause } from './shared.ts';
+import { isRejected, pause, settleBounded } from './shared.ts';
 import { recoveryProof, sameRecoveryProof } from '../recovery.ts';
 import { STATEFUL_CONSTRUCTOR_LIMITATION_URL } from '../verification/limitations.ts';
 import { assertPinnedAbsent, pinnedJournalCommitment } from '../verification/pinned-runtime.ts';
 import { append, fail, report, summarizeVerification } from './report.ts';
 import type { Client, Hash, ResourceId } from '../types.ts';
 import { verificationInconclusive } from '../verification/index.ts';
+import { shareReads } from '../verification/shared-reads.ts';
 import type { VerificationResult, VerifyOptions } from '../verification/types.ts';
 import type {
   ApplyContext,
@@ -100,16 +101,52 @@ export async function verify(
   });
 }
 
+/** The checks of one verification boundary that are in flight together, with their retries and fallbacks. */
+const VERIFY_CONCURRENCY = 4;
+
+/** Gives the view of a client that one verification boundary reads through. */
+type ReadScope = (client: Client) => Client;
+const direct: ReadScope = (client) => client;
+
+/** One canonical block for a set of checks, and the reads that the checks share at that block. */
+interface ReadSnapshot {
+  number: bigint;
+  hash: Hash;
+  reads: ReadScope;
+}
+
+/**
+ * Selects the latest block for one verification boundary. Each client gets one view that shares
+ * its identical reads. The views end with the boundary, so a later boundary reads the chain again.
+ */
+async function openSnapshot(ctx: ApplyContext): Promise<ReadSnapshot> {
+  const block = await retryRead(
+    () => ctx.client.getBlock({ blockTag: 'latest' }),
+    receiptRetryOptions(ctx.config),
+  );
+  const views = new Map<Client, Client>();
+  return {
+    number: block.number,
+    hash: block.hash,
+    reads(client) {
+      const view = views.get(client) ?? shareReads(client);
+      views.set(client, view);
+      return view;
+    },
+  };
+}
+
 // The alternate RPC may answer only after it agrees on the chain and the anchor block.
 async function verifyWithFallback(
   ctx: ApplyContext,
   item: PreparedAction,
   options: VerifyOptions,
   anchor: { blockNumber: bigint; blockHash: Hash },
+  reads: ReadScope,
 ): Promise<VerificationResult | null> {
   let primary: VerificationResult | null = null;
   try {
-    primary = await verify(ctx, item, options);
+    primary = await verify(ctx, item, options, reads(ctx.client));
   } catch (error) {
     if (!isRpcError(error)) throw error;
   }
@@ -118,7 +155,7 @@ async function verifyWithFallback(
   if (ctx.verificationClient) {
     try {
       await checkVerificationChain(ctx.verificationClient, ctx.plan.chain, anchor);
-      const alternate = await verify(ctx, item, options, ctx.verificationClient);
+      const alternate = await verify(ctx, item, options, reads(ctx.verificationClient));
       if (alternate.status === 'verified') return alternate;
       // An execution failure from one RPC cannot settle a provider failure from
       // the other. Keep retrying the canonical receipt until one verifies or
@@ -148,10 +185,11 @@ async function verifyUntil(
   anchor: { blockNumber: bigint; blockHash: Hash },
   deadline: number,
   recheck: () => Promise<unknown>,
+  reads: ReadScope = direct,
 ): Promise<VerificationResult | null> {
   let delay = 500;
   for (;;) {
-    const attempt = await verifyWithFallback(ctx, item, options, anchor);
+    const attempt = await verifyWithFallback(ctx, item, options, anchor, reads);
     if ((attempt && !providerVerificationFailure(attempt)) || Date.now() >= deadline)
       return attempt;
     await recheck();
@@ -160,22 +198,27 @@ async function verifyUntil(
   }
 }
 
-/** Verifies current state at one canonical block. An outage stops resumably, never as drift. */
+/**
+ * Verifies current state at one canonical block: the block of `shared`, or the latest block.
+ * An outage stops resumably, never as drift.
+ */
 async function verifyCurrent(
   ctx: ApplyContext,
   item: PreparedAction,
   options: VerifyOptions = {},
+  shared?: ReadSnapshot,
 ): Promise<VerificationResult> {
   const retry = receiptRetryOptions(ctx.config);
-  const block = await retryRead(() => ctx.client.getBlock({ blockTag: 'latest' }), retry);
-  const snapshot = { number: block.number, hash: block.hash };
+  const snapshot =
+    shared ?? (await retryRead(() => ctx.client.getBlock({ blockTag: 'latest' }), retry));
   const verification = await verifyUntil(
     ctx,
     item,
-    { ...options, blockNumber: block.number },
-    { blockNumber: block.number, blockHash: block.hash },
+    { ...options, blockNumber: snapshot.number },
+    { blockNumber: snapshot.number, blockHash: snapshot.hash },
     Date.now() + ctx.config.verificationTimeoutMs,
     () => assertCanonicalSnapshot(ctx, snapshot, retry),
+    shared?.reads,
   );
   if (verification && !providerVerificationFailure(verification)) return verification;
   throw new ApplyError('dependency', `Verification RPC failed for ${item.planned.id}.`, {
@@ -273,10 +316,12 @@ export async function stableReceipt(
   retry: ReceiptRetryOptions = receiptRetryOptions(ctx.config),
   confirmations = 1,
 ): Promise<Receipt> {
+  const receipts = (ctx.validatedReceipts ??= new Map());
   const deadline = retry.deadline;
   const anchor = { number: BigInt(receipt.blockNumber), hash: receipt.blockHash.toLowerCase() };
   for (;;) {
-    const current = await findReceipt(ctx.client, transactionHash, retry);
+    const current =
+      receipts.get(transactionHash) ?? (await findReceipt(ctx.client, transactionHash, retry));
     const block = await findBlock(ctx.client, anchor.number, retry);
     // Only a receipt or block that disagrees with the anchor proves a reorg; a lagging node
     // can lack either one while the recorded block is still canonical.
@@ -285,6 +330,7 @@ export async function stableReceipt(
       (current &&
         (current.blockHash.toLowerCase() !== anchor.hash || current.blockNumber !== anchor.number))
     ) {
+      receipts.clear();
       throw new ApplyError(
         'reorg',
         `Receipt for ${transactionHash} is no longer in its canonical block.`,
@@ -292,6 +338,7 @@ export async function stableReceipt(
       );
     }
     if (current && block) {
+      receipts.set(transactionHash, current);
       const depth =
         confirmations === 1
           ? 1n
@@ -355,6 +402,7 @@ export async function revalidateVerified(
   confirmations = 1,
 ): Promise<void> {
   const retry = receiptRetryOptions(ctx.config);
+  const checks = new Map<string, () => Promise<Receipt>>();
   for (const item of ctx.prepared.values()) {
     const records = ctx.journal.forAction(ctx.plan.planHash, item.planned.id);
     const latest = records.at(-1);
@@ -371,13 +419,29 @@ export async function revalidateVerified(
       throw new ApplyError('journal', `Verified action ${item.planned.id} has no receipt.`, {
         actionId: item.planned.id,
       });
-    try {
-      await stableReceipt(ctx, hash, receipt, item.planned.id, wait, retry, confirmations);
-    } catch (error) {
-      if (!(error instanceof ApplyError) || error.code !== 'reorg') throw error;
+    const known = ctx.validatedReceipts?.get(hash);
+    const key =
+      known?.blockNumber === BigInt(receipt.blockNumber) &&
+      lower(known.blockHash) === lower(receipt.blockHash)
+        ? `${receipt.blockNumber}:${lower(receipt.blockHash)}`
+        : hash;
+    if (!checks.has(key))
+      checks.set(key, () =>
+        stableReceipt(ctx, hash, receipt, item.planned.id, wait, retry, confirmations),
+      );
+  }
+  const results = await Promise.allSettled([...checks.values()].map((check) => check()));
+  const failure =
+    results.find(
+      (result) =>
+        result.status === 'rejected' &&
+        result.reason instanceof ApplyError &&
+        result.reason.code === 'reorg',
+    ) ?? results.find((result) => result.status === 'rejected');
+  if (failure?.status === 'rejected') {
+    if (failure.reason instanceof ApplyError && failure.reason.code === 'reorg')
       await reopenVerified(ctx);
-      throw error;
-    }
+    throw failure.reason;
   }
 }
 
@@ -385,60 +449,70 @@ export async function revalidateVerified(
 export async function revalidateDesiredState(
   ctx: ApplyContext,
 ): Promise<{ number: bigint; hash: Hash }> {
-  const block = await retryRead(
-    () => ctx.client.getBlock({ blockTag: 'latest' }),
-    receiptRetryOptions(ctx.config),
-  );
-  const fresh = new Map<ResourceId, VerificationResult>();
+  const snapshot = await openSnapshot(ctx);
+  // A failure is reported in plan order: each resource before the first that has no completed verification.
+  const completed: PreparedAction[] = [];
+  let incomplete: ResourceId | undefined;
   for (const resource of ctx.plan.resources) {
     const item = ctx.prepared.get(resource.id);
     const outcome = ctx.outcomes.get(resource.id);
     if (!item || !outcome || !('verification' in outcome)) {
-      throw new ApplyError(
-        'postcondition',
-        `Resource ${resource.id} has no completed verification.`,
-        { actionId: resource.id },
-      );
+      incomplete = resource.id;
+      break;
     }
-    const verificationStart = Date.now();
+    completed.push(item);
+  }
+  const started = Date.now();
+  const results = await settleBounded(completed, VERIFY_CONCURRENCY, async (item) => {
+    const { id } = item.planned;
     const retry = receiptRetryOptions(ctx.config);
     const verification = await verifyUntil(
       ctx,
       item,
-      { blockNumber: block.number },
-      { blockNumber: block.number, blockHash: block.hash },
-      verificationStart + ctx.config.verificationTimeoutMs,
-      () => assertCanonicalSnapshot(ctx, block, retry),
+      { blockNumber: snapshot.number },
+      { blockNumber: snapshot.number, blockHash: snapshot.hash },
+      Date.now() + ctx.config.verificationTimeoutMs,
+      () => assertCanonicalSnapshot(ctx, snapshot, retry),
+      snapshot.reads,
     );
     if (!verification || providerVerificationFailure(verification)) {
-      throw new ApplyError('postcondition', `Final verification RPC failed for ${resource.id}.`, {
-        actionId: resource.id,
+      throw new ApplyError('postcondition', `Final verification RPC failed for ${id}.`, {
+        actionId: id,
         retryable: true,
       });
     }
-    ctx.timings.verificationMs += Date.now() - verificationStart;
     if (verification.status !== 'verified') {
       throw new ApplyError(
         'postcondition',
         `The final desired condition is ${verification.status}.`,
         {
-          actionId: resource.id,
+          actionId: id,
           evidence: {
-            blockNumber: String(block.number),
-            blockHash: block.hash,
+            blockNumber: String(snapshot.number),
+            blockHash: snapshot.hash,
             verification: summarizeVerification(verification),
           },
         },
       );
     }
-    fresh.set(resource.id, verification);
+    return verification;
+  });
+  // The checks overlap, so the phase is timed one time and not per resource.
+  ctx.timings.verificationMs += Date.now() - started;
+  const failure = results.find(isRejected);
+  if (failure) throw failure.reason;
+  if (incomplete)
+    throw new ApplyError('postcondition', `Resource ${incomplete} has no completed verification.`, {
+      actionId: incomplete,
+    });
+  await assertCanonicalSnapshot(ctx, snapshot);
+  for (const [index, item] of completed.entries()) {
+    const outcome = ctx.outcomes.get(item.planned.id)!;
+    const result = results[index];
+    if ('verification' in outcome && result?.status === 'fulfilled')
+      ctx.outcomes.set(item.planned.id, { ...outcome, verification: result.value });
   }
-  await assertCanonicalSnapshot(ctx, block);
-  for (const [id, verification] of fresh) {
-    const outcome = ctx.outcomes.get(id)!;
-    if ('verification' in outcome) ctx.outcomes.set(id, { ...outcome, verification });
-  }
-  return { number: block.number, hash: block.hash };
+  return { number: snapshot.number, hash: snapshot.hash };
 }
 
 export async function assertCanonicalSnapshot(
@@ -872,46 +946,55 @@ export async function checkExecutionDependencies(
   work: { item: PreparedAction }[],
   requireCompleted = true,
 ): Promise<void> {
-  const checked = new Map<ResourceId, VerificationResult>();
-  for (const { item } of work) {
+  // List each distinct dependency with the first action that needs it, in plan order, up to the
+  // first dependency that is not complete. A failure is reported in this order.
+  const required = new Map<ResourceId, { item: PreparedAction; dependency: PreparedAction }>();
+  let incomplete: { item: PreparedAction; id: ResourceId } | undefined;
+  list: for (const { item } of work) {
     for (const id of item.planned.dependencies) {
       const dependency = ctx.prepared.get(id);
       const outcome = ctx.outcomes.get(id);
       if (!dependency || (requireCompleted && !(outcome && 'verification' in outcome))) {
-        throw new ApplyError(
-          'dependency',
-          `${item.planned.id} needs completed dependency ${id} before signing.`,
-          { actionId: item.planned.id },
-        );
+        incomplete = { item, id };
+        break list;
       }
-      if (!checked.has(id)) {
-        const evidence = ctx.journal
-          .forAction(ctx.plan.planHash, id)
-          .filter(
-            (
-              record,
-            ): record is JournalRecord & (import('./types.ts').ReceiptFields | VerifiedFields) =>
-              (record.phase === 'receipt' || record.phase === 'verified') &&
-              Boolean(record.transactionHash),
-          )
-          .at(-1);
-        const transactionHash =
-          outcome && 'transactionHash' in outcome
-            ? outcome.transactionHash
-            : evidence?.transactionHash;
-        // Recovery can check a dependency before its wave is revisited. Reuse the
-        // creation proof this plan journaled instead of replaying the creation.
-        const creationProof =
-          !outcome && evidence?.phase === 'verified' ? evidence.creationProof : undefined;
-        checked.set(
-          id,
-          await verifyCurrent(ctx, dependency, {
-            ...(transactionHash ? { transactionHash } : {}),
-            ...(creationProof ? { creationProof } : {}),
-          }),
-        );
-      }
-      const verification = checked.get(id)!;
+      if (!required.has(id)) required.set(id, { item, dependency });
+    }
+  }
+  // The checks of one call read at one block, share their identical reads and overlap.
+  const snapshot = required.size ? await openSnapshot(ctx) : undefined;
+  const results = await settleBounded(
+    [...required],
+    VERIFY_CONCURRENCY,
+    async ([id, { item, dependency }]) => {
+      const outcome = ctx.outcomes.get(id);
+      const evidence = ctx.journal
+        .forAction(ctx.plan.planHash, id)
+        .filter(
+          (
+            record,
+          ): record is JournalRecord & (import('./types.ts').ReceiptFields | VerifiedFields) =>
+            (record.phase === 'receipt' || record.phase === 'verified') &&
+            Boolean(record.transactionHash),
+        )
+        .at(-1);
+      const transactionHash =
+        outcome && 'transactionHash' in outcome
+          ? outcome.transactionHash
+          : evidence?.transactionHash;
+      // Recovery can check a dependency before its wave is revisited. Reuse the
+      // creation proof this plan journaled instead of replaying the creation.
+      const creationProof =
+        !outcome && evidence?.phase === 'verified' ? evidence.creationProof : undefined;
+      const verification = await verifyCurrent(
+        ctx,
+        dependency,
+        {
+          ...(transactionHash ? { transactionHash } : {}),
+          ...(creationProof ? { creationProof } : {}),
+        },
+        snapshot,
+      );
       if (verification.status !== 'verified') {
         throw new ApplyError(
           'dependency',
@@ -922,6 +1005,16 @@ export async function checkExecutionDependencies(
           },
         );
       }
-    }
-  }
+    },
+  );
+  const failure = results.find(isRejected);
+  if (failure) throw failure.reason;
+  if (incomplete)
+    throw new ApplyError(
+      'dependency',
+      `${incomplete.item.planned.id} needs completed dependency ${incomplete.id} before signing.`,
+      { actionId: incomplete.item.planned.id },
+    );
+  // The dependents sign next. Their prerequisites hold only if the block that showed them is still canonical.
+  if (snapshot) await assertCanonicalSnapshot(ctx, snapshot);
 }

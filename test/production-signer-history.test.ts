@@ -3,7 +3,7 @@ import test from 'node:test';
 import { InternalRpcError } from 'viem';
 import { assertSignerHistory } from '../src/execution/settlement.ts';
 import { hashJson } from '../src/identity.ts';
-import { deployerA } from './execution/chain.ts';
+import { deployerA, deployerB } from './execution/chain.ts';
 import type { ApplyContext, SignedIndexEntry } from '../src/execution/types.ts';
 import type { Hash } from '../src/types.ts';
 
@@ -46,6 +46,7 @@ function history(
   const indexed: { label: string; address: string }[] = [];
   const journalReads: string[] = [];
   const receiptLookups: string[] = [];
+  const nonceReads: bigint[] = [];
   const receipts = new Set(mined);
   const ordered = [original, replacement, otherAction].flatMap((transactionHash) =>
     rows.filter((row) => row.transactionHash === transactionHash),
@@ -80,6 +81,7 @@ function history(
     scope,
     plan: { planHash: currentPlan },
     config: { confirmations, receiptTimeoutMs: 20 },
+    journal: { records: journal.map((record) => ({ ...record, rawTransaction: '0x01' })) },
     journalStore: {
       async *signedForSigner(requestedScope: typeof scope, address: string) {
         indexed.push({ label: requestedScope.label, address });
@@ -102,9 +104,23 @@ function history(
           ? { number: latestBlock, hash: blockHash }
           : { number: blockNumber, hash: blockHash };
       },
+      // Each mined transaction is in block 12 at nonce 7, so the account nonce is 8 from that block.
+      async getTransactionCount({
+        address,
+        blockNumber,
+      }: {
+        address: string;
+        blockNumber: bigint;
+      }) {
+        nonceReads.push(blockNumber);
+        const used = rows.some(
+          (row) => row.signer === address.toLowerCase() && receipts.has(row.transactionHash),
+        );
+        return used && blockNumber >= 12n ? 8 : 7;
+      },
     },
   } as unknown as ApplyContext;
-  return { ctx, indexed, journalReads, receiptLookups };
+  return { ctx, indexed, journalReads, receiptLookups, nonceReads };
 }
 
 async function rejectsCode(ctx: ApplyContext, code: string, actionId = 'contract:alpha') {
@@ -117,12 +133,13 @@ async function rejectsCode(ctx: ApplyContext, code: string, actionId = 'contract
 
 test('a mined replacement settles the original index row across deployment labels', async () => {
   const rows = [indexEntry(original), indexEntry(replacement)];
-  const { ctx, indexed, journalReads, receiptLookups } = history(rows, [replacement]);
+  const { ctx, indexed, journalReads, receiptLookups, nonceReads } = history(rows, [replacement]);
   await assertSignerHistory(ctx, [deployerA.address]);
   assert.deepEqual(indexed, [{ label: 'next', address: signer }]);
   assert.deepEqual(journalReads, [{ ...ctx.scope, label: 'previous' }]);
-  assert.ok(receiptLookups.includes(original));
-  assert.ok(receiptLookups.includes(replacement));
+  // The chain used the nonce, so one account nonce read settles both rows and no receipt is read.
+  assert.deepEqual(nonceReads, [12n]);
+  assert.deepEqual(receiptLookups, []);
 });
 
 test('the original receipt also settles a signer nonce with a replacement index row', async () => {
@@ -138,13 +155,15 @@ test('missing receipts and insufficient confirmations stop signer reuse', async 
   await assertSignerHistory(history(rows, [replacement], 2, 13n).ctx, [deployerA.address]);
 });
 
-test('a receipt for one action cannot settle another indexed action at the same nonce', async () => {
+test('a signature whose nonce another transaction used cannot be included, so it does not stop the signer', async () => {
   const rows = [
     indexEntry(original),
     indexEntry(replacement),
     indexEntry(otherAction, 'contract:beta'),
   ];
-  await rejectsCode(history(rows, [replacement]).ctx, 'foreign-outstanding', 'contract:beta');
+  await assertSignerHistory(history(rows, [replacement]).ctx, [deployerA.address]);
+  // The same signature stops the signer while the chain has not used its nonce.
+  await rejectsCode(history(rows, []).ctx, 'foreign-outstanding');
 });
 
 test('an unlinked signed transaction at the same action and nonce is not a replacement variant', async () => {
@@ -176,9 +195,9 @@ test('shared signer history remains usable after a transient receipt outage', as
   const { ctx } = history([indexEntry(original)], [original]);
   ctx.config.pollIntervalMs = 1;
   ctx.config.receiptTimeoutMs = 1_000;
-  const lookup = ctx.client.getTransactionReceipt;
+  const lookup = ctx.client.getTransactionCount;
   let failed = false;
-  ctx.client.getTransactionReceipt = async (request) => {
+  ctx.client.getTransactionCount = async (request) => {
     if (!failed) {
       failed = true;
       throw new InternalRpcError(new Error('temporarily unavailable'));
@@ -187,4 +206,110 @@ test('shared signer history remains usable after a transient receipt outage', as
   };
   await assertSignerHistory(ctx, [deployerA.address]);
   assert.equal(failed, true);
+});
+
+test('the open current journal survives reread outages and includes later signatures', async () => {
+  const rows = [{ ...indexEntry(original), label: 'next', planHash: currentPlan }];
+  const { ctx } = history(rows, [original]);
+  ctx.journalStore!.read = async function* () {
+    throw new Error('journal reread unavailable');
+  };
+  ctx.journalStore!.head = async () => {
+    throw new Error('journal head reread unavailable');
+  };
+  await assertSignerHistory(ctx, [deployerA.address]);
+  ctx.journalStore!.signedForSigner = async function* () {
+    throw new Error('signer index unavailable');
+  };
+  const next = { ...rows[0], transactionHash: otherAction, actionId: 'contract:beta', nonce: '8' };
+  rows.push(next);
+  ctx.journal.records.push({ ...ctx.journal.records[0], ...next, sequence: 2 });
+  await rejectsCode(ctx, 'foreign-outstanding', 'contract:beta');
+});
+
+for (const field of ['project', 'environment', 'label']) {
+  test(`another ${field} still requires a valid source journal`, async () => {
+    const row = { ...indexEntry(original), label: 'next', planHash: currentPlan, [field]: 'other' };
+    const { ctx } = history([row], [original]);
+    const read = ctx.journalStore!.read;
+    ctx.journalStore!.read = async function* (scope) {
+      for await (const record of read(scope)) yield { ...record, recordHash: hash('e') };
+    };
+    await assert.rejects(
+      assertSignerHistory(ctx, [deployerA.address]),
+      /Journal integrity failure/,
+    );
+  });
+}
+
+test('validated signer history survives reread outages but still detects reorganizations and reloads on restart', async () => {
+  const rows = [indexEntry(original)];
+  const { ctx } = history(rows, [original]);
+  await assertSignerHistory(ctx, [deployerA.address]);
+  const unavailable = async function* () {
+    throw new Error('history reread unavailable');
+  };
+  ctx.journalStore!.signedForSigner = unavailable;
+  ctx.journalStore!.read = unavailable;
+  ctx.journalStore!.head = async () => {
+    throw new Error('head reread unavailable');
+  };
+  await assertSignerHistory(ctx, [deployerA.address]);
+  // A reorganization removes the transaction from the chain: its block changes and its nonce is free again.
+  ctx.client.getBlock = async () => ({ number: 12n, hash: hash('e') });
+  ctx.client.getTransactionCount = async () => 7;
+  await rejectsCode(ctx, 'reorg');
+  await rejectsCode(history(rows, []).ctx, 'foreign-outstanding');
+});
+
+test('a replacement appended after the history snapshot can settle its original signature', async () => {
+  const { ctx } = history(
+    [{ ...indexEntry(original), label: 'next', planHash: currentPlan }],
+    [replacement],
+  );
+  await assertSignerHistory(ctx, [deployerA.address], new Set([original]));
+  ctx.journalStore!.signedForSigner = async function* () {
+    throw new Error('index unavailable');
+  };
+  ctx.journal.records.push({
+    ...ctx.journal.records[0],
+    sequence: 2,
+    transactionHash: replacement,
+    replacement: true,
+    replacesTransactionHash: original,
+  });
+  await assertSignerHistory(ctx, [deployerA.address]);
+});
+
+test('a snapshot for one signer cannot hide another signer outstanding transaction', async () => {
+  const rows = [
+    indexEntry(original),
+    { ...indexEntry(otherAction, 'contract:beta'), signer: deployerB.address.toLowerCase() },
+  ];
+  const { ctx } = history(rows, [original]);
+  ctx.journalStore!.signedForSigner = async function* (_scope, address) {
+    for (const row of rows) if (row.signer === address) yield row;
+  };
+  await assertSignerHistory(ctx, [deployerA.address]);
+  await assert.rejects(assertSignerHistory(ctx, [deployerB.address]), (error) => {
+    assert.equal(error.code, 'foreign-outstanding', error.message);
+    assert.equal(error.actionId, 'contract:beta');
+    return true;
+  });
+});
+
+test('an interrupted index read cannot publish a partial history snapshot', async () => {
+  const rows = [indexEntry(original), { ...indexEntry(otherAction, 'contract:beta'), nonce: '8' }];
+  const { ctx } = history(rows, [original]);
+  let interrupted = false;
+  ctx.journalStore!.signedForSigner = async function* () {
+    yield rows[0]!;
+    if (!interrupted) {
+      interrupted = true;
+      throw new Error('index interrupted');
+    }
+    yield rows[1]!;
+  };
+  await assert.rejects(assertSignerHistory(ctx, [deployerA.address]), /index interrupted/);
+  await rejectsCode(ctx, 'foreign-outstanding', 'contract:beta');
 });

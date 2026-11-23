@@ -36,10 +36,12 @@ async function setup(pipeline = false) {
   });
   const journalFile = path.join(dir, 'journal.jsonl');
   let signatures = 0;
+  const signedNonces: unknown[] = [];
   const signer = {
     address: deployerA.address,
     async signTransaction(request: Parameters<typeof deployerA.signTransaction>[0]) {
       signatures++;
+      signedNonces.push(request.nonce);
       return deployerA.signTransaction(request);
     },
   };
@@ -53,7 +55,7 @@ async function setup(pipeline = false) {
     pipeline,
     pollIntervalMs: 10,
   };
-  return { chain, options, journalFile, signatures: () => signatures };
+  return { chain, options, journalFile, signatures: () => signatures, signedNonces };
 }
 
 test('serial retry binds a durable signature to its own intent after an unsigned crash', async () => {
@@ -137,10 +139,11 @@ test('pipeline abandons an unsigned wave and preserves signed nonce offsets on r
     const before = await journal(run.journalFile);
     const saved = before.filter((record) => record.phase === 'signed');
     assert.equal(saved.length, 1);
-    assert.equal(run.signatures(), 1);
     const result = await applyPlan(run.options);
     assert.equal(result.status, 'applied');
-    assert.equal(run.signatures(), 3);
+    // The signatures of a group overlap, so the crash can lose signatures that were not stored yet.
+    // The stored signature is never made again.
+    assert.equal(run.signedNonces.filter((nonce) => nonce === Number(saved[0].nonce)).length, 1);
     const after = await journal(run.journalFile);
     assert.deepEqual(
       after.filter((record) => record.phase === 'signed').map((record) => record.nonce),

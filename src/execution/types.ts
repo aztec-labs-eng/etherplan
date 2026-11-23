@@ -283,6 +283,17 @@ export interface JournalStore {
     record: StoredJournalRecord,
     options: JournalAppendOptions,
   ): Promise<StoredJournalRecord>;
+  /**
+   * Optional. Stores the first records of a contiguous run in one atomic write that has one head
+   * update, and returns how many it stored: one or more, and not all of them when the run is longer
+   * than the store accepts in one write. `options` gives the position of the first record. The run
+   * has no signed record. A store without it gets one `append` for each record.
+   */
+  appendBatch?(
+    scope: DeploymentScope,
+    records: StoredJournalRecord[],
+    options: JournalAppendOptions,
+  ): Promise<number>;
   signedForSigner(scope: DeploymentScope, address: string): AsyncIterable<SignedIndexEntry>;
 }
 
@@ -602,6 +613,18 @@ export interface Journal {
   records: JournalRecord[];
   /** Appends are serialized; the promise resolves only after the record is durable. */
   append(fields: JournalRecordInput): Promise<JournalRecord>;
+  /**
+   * Present when the store has batch writes. Appends a run of records that has no signed record, in
+   * order and in as few writes as the store accepts. It resolves when all of them are durable. After
+   * a rejection, the records of the writes that succeeded are durable and are in `records`.
+   */
+  appendAll?(fields: JournalRecordInput[]): Promise<JournalRecord[]>;
+  /**
+   * Present on a stored journal. Encrypts the bytes of a signed record now, outside the queue of
+   * writes, so that the append of the same record stores that ciphertext. It resolves when the
+   * encryption ends and it never rejects: after a failure, the append encrypts again.
+   */
+  prepare?(fields: JournalRecordInput): Promise<void>;
   forAction(planHash: Hash, actionId: ResourceId): JournalRecord[];
   close(): Promise<void>;
 }
@@ -723,6 +746,7 @@ export type ReportEvent = ReportEventBase &
       }
     | { type: 'recovery'; actionId: ResourceId; transactionHash: Hash; reservationId?: string }
     | { type: 'resource-reused' | 'resource-resumed'; actionId: ResourceId }
+    | { type: 'step'; step: ApplyStep; wave?: number; durationMs: number; failed?: boolean }
   );
 
 export type ReportEventType = ReportEvent['type'];
@@ -860,6 +884,39 @@ export interface ApplyTimings {
   verificationMs: number;
 }
 
+/** The steps of an apply that are timed. The steps from receipt-sweep to intents prepare one group. */
+export type ApplyStep =
+  | 'preflight'
+  | 'settle-journal'
+  | 'recheck-reused'
+  | 'receipt-sweep'
+  | 'wave-verifications'
+  | 'resume-wave'
+  | 'decide'
+  | 'estimate'
+  | 'funding'
+  | 'replay-capability'
+  | 'prerequisites'
+  | 'signer-history'
+  | 'nonces'
+  | 'intents'
+  | 'sign'
+  | 'store-signatures'
+  | 'settle'
+  | 'final-receipts'
+  | 'final-verification'
+  | 'state-commit';
+
+/** The wall time of one step. The steps do not overlap, so their times can be added. */
+export interface StepTiming {
+  step: ApplyStep;
+  /** The schedule wave that the step belongs to, when it belongs to one. */
+  wave?: number;
+  startedAt: string;
+  ms: number;
+  failed?: true;
+}
+
 export type StateWriteResult =
   | { file: string | null; written: false; reason?: string }
   | { file: string | null; written: true; resources: number };
@@ -909,6 +966,8 @@ export interface ApplyResult {
   parallel: boolean;
   pipeline: boolean;
   timings: ApplyTimings;
+  /** Each timed step in the order that it ended. */
+  steps: StepTiming[];
   transactionsSigned: number;
   transactions: SentTransaction[];
   rebroadcasts: { actionId: ResourceId; transactionHash: Hash }[];

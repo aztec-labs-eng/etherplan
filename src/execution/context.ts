@@ -23,9 +23,11 @@ import type {
   JournalStore,
   Lock,
   PreparedAction,
+  Receipt,
   ReportEvent,
   ResourceOutcome,
   SentTransaction,
+  SignedIndexEntry,
   SignerAccount,
   SignerAuthorization,
   SignerLanes,
@@ -33,6 +35,8 @@ import type {
   SignerRoles,
   Signers,
   StateWriteResult,
+  StepTiming,
+  StoredJournalRecord,
 } from './types.ts';
 
 /** Initialized once after the lock and journal are open; run fills the preflight fields. */
@@ -59,7 +63,13 @@ export interface ApplyContext {
   sent: SentTransaction[];
   rebroadcasts: { actionId: ResourceId; transactionHash: Hash }[];
   outcomes: Map<ResourceId, ResourceOutcome>;
+  validatedReceipts?: Map<Hash, Receipt>;
+  signerHistory?: {
+    signers: Map<string, { entries: SignedIndexEntry[]; sequence: number }>;
+    journals: Map<string, StoredJournalRecord[]>;
+  };
   timings: ApplyTimings;
+  steps: StepTiming[];
   state: StateWriteResult;
   prepared: Map<ResourceId, PreparedAction>;
   stateSnapshot: StateFile | null;
@@ -397,6 +407,7 @@ export async function openApplyContext({
       rebroadcasts: [],
       outcomes: new Map<ResourceId, ResourceOutcome>(),
       timings: { submitMs: 0, receiptMs: 0, verificationMs: 0 },
+      steps: [],
       state: { file: stateFile ?? null, written: false },
       prepared: new Map<ResourceId, PreparedAction>(),
       stateSnapshot: null,

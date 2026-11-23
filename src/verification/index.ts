@@ -9,6 +9,7 @@ import {
   linkedLibraries,
 } from './bytecode.ts';
 import { decodeMetadataTail } from './metadata.ts';
+import { readSource } from './shared-reads.ts';
 import { replayProviderFailure, simulateCreate2 } from './simulate.ts';
 import { abiArguments, normalizeOutputs, safeError, sameJson } from './values.ts';
 import { abiFunction } from '../validation/index.ts';
@@ -65,8 +66,20 @@ export { abiArguments, normalizeAbiValue, normalizeOutputs, safeError } from './
 
 const PINNED_MINT = Symbol('pinned-runtime apply mint');
 const READ_FAILURES = Symbol('apply read failures');
+const CREATION_CACHE = Symbol('apply creation evidence');
+type CreationCache = WeakMap<PreparedContract, { client: Client; creation: CreationVerification }>;
+
 const NOT_FOUND = /^(?:Transaction|TransactionReceipt|Block)NotFoundError$/;
 const inconclusive = new WeakSet<VerificationResult>();
+
+export function createApplyVerifier(): typeof verifyResourceForApply {
+  const cache: CreationCache = new WeakMap();
+  return (resource, client, options = {}) =>
+    verifyResourceForApply(resource, client, {
+      ...options,
+      [CREATION_CACHE]: cache,
+    } as VerifyOptions);
+}
 
 /** Internal apply entry point. A public verification call can revalidate a saved pin but cannot mint one. */
 export async function verifyResourceForApply(
@@ -319,6 +332,56 @@ function immutableLabel(info: NamedImmutable | undefined, id: string): string {
   return info?.name ? `${info.name} (AST ${id})` : `AST ${id}`;
 }
 
+async function recheckCreation(
+  known: CreationVerification,
+  resource: PreparedContract,
+  client: Client,
+  options: VerifyOptions,
+): Promise<CreationVerification> {
+  const proof = known.proof!;
+  const result = structuredClone(known);
+  delete result.proof;
+  result.status = 'unverified';
+  result.exactRuntime = false;
+  try {
+    const block = await client.getBlock({ blockNumber: BigInt(proof.blockNumber) });
+    if (lower(block.hash) !== lower(proof.blockHash)) {
+      result.reasons.push('Saved creation block is no longer canonical.');
+      return result;
+    }
+    for (const child of result.createdCode ?? []) {
+      const fn = abiFunction(resource.artifact.abi, child.getter, 0, resource.id);
+      const [getter, code] = await Promise.all([
+        readFunction(client, {
+          address: resource.address,
+          fn,
+          args: [],
+          blockNumber: blockOf(options.blockNumber),
+        }),
+        client.getCode({ address: child.address, ...at(blockOf(options.blockNumber)) }),
+      ]);
+      child.currentGetter = typeof getter === 'string' ? (getter as Address) : null;
+      child.currentCodeHash = hasCode(code) ? keccak256(code) : null;
+      child.matched =
+        lower(child.currentGetter) === lower(child.address) &&
+        lower(child.currentCodeHash) === lower(child.codeHash);
+      if (!child.matched) {
+        result.reasons.push(
+          'Created child differs from its getter address or precommitted runtime hash.',
+        );
+        return result;
+      }
+    }
+    result.status = 'verified';
+    result.exactRuntime = true;
+    result.proof = proof;
+  } catch (error) {
+    if (readFailed(options, error)) result.replayFailure = 'provider';
+    result.reasons.push('Creation anchor or current child state is not available.');
+  }
+  return result;
+}
+
 async function creationEvidence(
   result: VerificationResult,
   resource: PreparedContract,
@@ -327,10 +390,27 @@ async function creationEvidence(
   options: VerifyOptions,
   code: Hex,
 ): Promise<ProofMethod | null> {
-  const creation = await verifyCreation(client, resource, transactionHash, {
-    ...options,
-    liveCode: code,
-  });
+  const cache = (options as VerifyOptions & { [CREATION_CACHE]?: CreationCache })[CREATION_CACHE];
+  const known = cache?.get(resource);
+  const priorProof = known?.creation.proof;
+  // A boundary reads through its own view of the client. The evidence belongs to the provider behind it.
+  const source = readSource(client);
+  const reusable =
+    known?.client === source &&
+    priorProof &&
+    lower(priorProof.transactionHash) === lower(transactionHash) &&
+    sameJson(priorProof, options.creationProof) &&
+    lower(priorProof.codeHash) === keccak256(code) &&
+    (!options.expectedCreator || lower(options.expectedCreator) === lower(priorProof.creator)) &&
+    (!options.chain ||
+      (options.chain.id === priorProof.chain.id &&
+        lower(options.chain.genesisHash) === lower(priorProof.chain.genesisHash)));
+  const creation = reusable
+    ? await recheckCreation(known.creation, resource, client, options)
+    : await verifyCreation(client, resource, transactionHash, { ...options, liveCode: code });
+  if (creation.status === 'verified' && creation.proof)
+    cache?.set(resource, { client: source, creation: structuredClone(creation) });
+  else cache?.delete(resource);
   const method =
     creation.method === 'pinned-runtime'
       ? 'pinned-runtime'

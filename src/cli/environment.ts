@@ -2,7 +2,7 @@ import { normalizeNamedSigners } from '../scheduling/index.ts';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { createPublicClient, http } from 'viem';
+import { createPublicClient, fallback, http } from 'viem';
 import { DescribeTableCommand, DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DescribeKeyCommand, KMSClient } from '@aws-sdk/client-kms';
 import { privateKeyToAccount } from 'viem/accounts';
@@ -130,10 +130,20 @@ export async function assertAwsBackendInitialized(
 function isPrivateKey(value: string): value is Hex {
   return /^0x[0-9a-fA-F]{64}$/.test(value);
 }
-export function publicClient(): Client {
-  if (!process.env.ETH_RPC_URL)
+/** The reads that go in one HTTP batch when they start together. A broadcast is always its own request. */
+const BATCHED_METHODS = ['eth_getBlockByNumber', 'eth_estimateGas', 'eth_getCode', 'eth_call'];
+/** The most reads in one HTTP batch. Overlapping verification work can queue more than this. */
+const BATCH_SIZE = 16;
+
+export function publicClient(url = process.env.ETH_RPC_URL): Client {
+  if (!url)
     throw new Error('Set ETH_RPC_URL for plan, schedule, verify, import, apply, or unfinished.');
-  return createPublicClient({ transport: http(process.env.ETH_RPC_URL) });
+  return createPublicClient({
+    transport: fallback([
+      http(url, { batch: { batchSize: BATCH_SIZE }, methods: { include: BATCHED_METHODS } }),
+      http(url, { methods: { exclude: BATCHED_METHODS } }),
+    ]),
+  });
 }
 
 /** The explicit or configured state file, or .etherplan/<workspace>/state.json beside the spec. */

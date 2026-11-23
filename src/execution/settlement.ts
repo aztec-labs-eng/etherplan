@@ -15,6 +15,7 @@ import {
   receiptAfterNonceUse,
   receiptJson,
   receiptRetryOptions,
+  retryRead,
   signEnvelope,
   validateSignedTransaction,
   waitForReceipt,
@@ -93,14 +94,17 @@ export async function assertSignerHistory(
     return;
   }
   if (!journalStore || !scope) return;
-  const scopeRecords = new Map<string, StoredJournalRecord[]>();
-  const priorJournal = async (entry: SignedIndexEntry): Promise<StoredJournalRecord[]> => {
+  const history = (ctx.signerHistory ??= { signers: new Map(), journals: new Map() });
+  const priorJournal = async (
+    entry: SignedIndexEntry,
+  ): Promise<(StoredJournalRecord | JournalRecord)[]> => {
     const priorScope = deploymentScope(
       { project: entry.project, environment: entry.environment, label: entry.label },
       { id: scope.chainId, genesisHash: scope.genesisHash },
     );
     const key = scopeKey(priorScope);
-    const cached = scopeRecords.get(key);
+    if (key === scopeKey(scope)) return ctx.journal.records;
+    const cached = history.journals.get(key);
     if (cached) return cached;
     const records: StoredJournalRecord[] = [];
     for await (const record of journalStore.read(priorScope)) records.push(record);
@@ -113,12 +117,58 @@ export async function assertSignerHistory(
       )
         throw new ApplyError('journal', `Signer source journal ${key} differs from its head.`);
     }
-    scopeRecords.set(key, records);
+    history.journals.set(key, records);
     return records;
   };
+  const retry = receiptRetryOptions(ctx.config);
+  const settled = new Map<string, bigint>();
+  let latest: bigint | undefined;
+  /**
+   * The account nonce of a signer at the newest block that has `confirmations` confirmations. The
+   * chain used each lower nonce at that depth, so a signature with a lower nonce cannot be included.
+   */
+  const settledNonce = async (address: string, confirmations: number): Promise<bigint> => {
+    const key = `${address}:${confirmations}`;
+    let nonce = settled.get(key);
+    if (nonce === undefined) {
+      latest ??= (await retryRead(() => ctx.client.getBlock({ blockTag: 'latest' }), retry)).number;
+      const blockNumber = latest - BigInt(confirmations - 1);
+      nonce =
+        blockNumber < 0n
+          ? 0n
+          : BigInt(
+              await retryRead(
+                () => ctx.client.getTransactionCount({ address: address as Address, blockNumber }),
+                retry,
+              ),
+            );
+      settled.set(key, nonce);
+    }
+    return nonce;
+  };
   for (const address of new Set(addresses.map((value) => value.toLowerCase()))) {
+    const cached = history.signers.get(address);
+    const entries = cached?.entries.slice() ?? [];
+    const sequence = ctx.journal.records.length;
+    if (!cached) {
+      for await (const signed of journalStore.signedForSigner(scope, address)) entries.push(signed);
+    } else {
+      for (const record of ctx.journal.records.slice(cached.sequence, sequence)) {
+        if (record.phase !== 'signed' || record.signer.toLowerCase() !== address) continue;
+        entries.push({
+          project: scope.project,
+          environment: scope.environment,
+          label: scope.label,
+          planHash: record.planHash,
+          actionId: record.actionId,
+          signer: record.signer,
+          nonce: record.nonce,
+          transactionHash: record.transactionHash,
+        });
+      }
+    }
     const groups = new Map<string, SignedIndexEntry[]>();
-    for await (const signed of journalStore.signedForSigner(scope, address)) {
+    for (const signed of entries) {
       if (
         typeof signed.project !== 'string' ||
         typeof signed.environment !== 'string' ||
@@ -153,7 +203,9 @@ export async function assertSignerHistory(
       const first = variants[0]!;
       const records = await priorJournal(first);
       const signed = records.filter(
-        (record): record is StoredJournalRecord & Omit<SignedFields, 'rawTransaction'> =>
+        (
+          record,
+        ): record is (StoredJournalRecord | JournalRecord) & Omit<SignedFields, 'rawTransaction'> =>
           record.phase === 'signed' &&
           record.planHash.toLowerCase() === first.planHash.toLowerCase() &&
           record.actionId === first.actionId &&
@@ -186,7 +238,15 @@ export async function assertSignerHistory(
         first.planHash.toLowerCase() === ctx.plan.planHash.toLowerCase() &&
         signed.every((record) => activeSignatures.has(record.transactionHash.toLowerCase()));
       if (activeCurrent) continue;
-      const retry = receiptRetryOptions(ctx.config);
+      const samePlan =
+        first.project === scope.project &&
+        first.environment === scope.environment &&
+        first.label === scope.label &&
+        first.planHash.toLowerCase() === ctx.plan.planHash.toLowerCase();
+      const confirmations = samePlan ? 1 : ctx.config.confirmations;
+      // The history of a signer grows with each deployment. One nonce read settles all of it that
+      // the chain has passed, and only a signature at a nonce that is still open needs its receipt.
+      if (BigInt(first.nonce) < (await settledNonce(address, confirmations))) continue;
       let mined: { signed: SignedIndexEntry; receipt: Receipt } | null = null;
       for (const signed of variants) {
         const receipt = await findReceipt(ctx.client, signed.transactionHash, retry);
@@ -203,11 +263,6 @@ export async function assertSignerHistory(
           { actionId: signed.actionId, retryable: true },
         );
       }
-      const samePlan =
-        first.project === scope.project &&
-        first.environment === scope.environment &&
-        first.label === scope.label &&
-        first.planHash.toLowerCase() === ctx.plan.planHash.toLowerCase();
       await stableReceipt(
         ctx,
         mined.signed.transactionHash,
@@ -215,9 +270,10 @@ export async function assertSignerHistory(
         mined.signed.actionId,
         false,
         retry,
-        samePlan ? 1 : ctx.config.confirmations,
+        confirmations,
       );
     }
+    history.signers.set(address, { entries, sequence });
   }
 }
 

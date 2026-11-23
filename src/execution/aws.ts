@@ -18,12 +18,14 @@ import type {
   AwsJournalCiphertext,
   DeploymentScope,
   FenceEntry,
+  JournalAppendOptions,
   JournalCipher,
   JournalStore,
   LockProvider,
   LockScope,
   PlanStore,
   StateStore,
+  StoredJournalRecord,
 } from './types.ts';
 
 export const lockKey = (scope: LockScope) =>
@@ -54,6 +56,8 @@ const leaseLost = () =>
 const DYNAMODB_REQUEST_TIMEOUT_MS = 5_000;
 const DYNAMODB_CONNECTION_TIMEOUT_MS = 3_000;
 const DYNAMODB_MAX_ATTEMPTS = 3;
+/** The most actions that DynamoDB accepts in one transaction. */
+const TRANSACTION_ACTIONS = 100;
 
 function dynamoDbClient(): DynamoDBClient {
   return new DynamoDBClient({
@@ -365,55 +369,85 @@ export function createAwsBackend({
         ExclusiveStartKey = page.LastEvaluatedKey;
       } while (ExclusiveStartKey);
     },
-    async append(scope, record, { expectedSequence, expectedPreviousHash, fence }) {
-      if (
-        !Number.isSafeInteger(expectedSequence) ||
-        expectedSequence < 1 ||
-        record.sequence !== expectedSequence ||
-        record.previousHash !== expectedPreviousHash ||
-        (expectedSequence === 1
-          ? expectedPreviousHash !== null
-          : !/^0x[0-9a-fA-F]{64}$/.test(expectedPreviousHash ?? '')) ||
-        !fence
-      ) {
-        throw new Error(
-          'Journal append needs the exact expected sequence, predecessor, and fence.',
-        );
-      }
-      const PK = deploymentKey(scope);
-      const previous = expectedSequence - 1;
-      await dynamodb.send(
-        new TransactWriteCommand({
-          TransactItems: [
-            ...checks(tableName, fence),
-            {
-              Update: {
-                TableName: tableName,
-                Key: { PK, SK: 'J#HEAD' },
-                UpdateExpression: 'SET #sequence = :sequence, #recordHash = :recordHash, #at = :at',
-                ConditionExpression:
-                  previous === 0
-                    ? 'attribute_not_exists(#sequence)'
-                    : '#sequence = :previous AND #recordHash = :previousHash',
-                ExpressionAttributeNames: {
-                  '#sequence': 'sequence',
-                  '#recordHash': 'recordHash',
-                  '#at': 'at',
-                },
-                ExpressionAttributeValues: {
-                  ':sequence': expectedSequence,
-                  ':recordHash': record.recordHash,
-                  ':at': record.at,
-                  ...(previous === 0
-                    ? {}
-                    : { ':previous': previous, ':previousHash': expectedPreviousHash }),
-                },
+    async append(scope, record, options) {
+      await writeRecords(scope, [record], options);
+      return record;
+    },
+    async appendBatch(scope, records, options) {
+      if (records.some((record) => record.phase === 'signed'))
+        throw new Error('A batch append stores no signed record.');
+      // One transaction holds the fence checks, the head update and one put for each record.
+      const batch = records.slice(0, TRANSACTION_ACTIONS - (options.fence?.length ?? 0) - 1);
+      await writeRecords(scope, batch, options);
+      return batch.length;
+    },
+  };
+
+  /**
+   * Stores a contiguous run of records in one transaction: the fence checks, one conditional update
+   * of the head from the predecessor of the run to its last record, the records, and the signer
+   * index entry of each signed record.
+   */
+  async function writeRecords(
+    scope: DeploymentScope,
+    records: StoredJournalRecord[],
+    { expectedSequence, expectedPreviousHash, fence }: JournalAppendOptions,
+  ): Promise<void> {
+    const last = records.at(-1);
+    if (
+      !last ||
+      !Number.isSafeInteger(expectedSequence) ||
+      expectedSequence < 1 ||
+      records.some(
+        (record, index) =>
+          record.sequence !== expectedSequence + index ||
+          record.previousHash !==
+            (index === 0 ? expectedPreviousHash : records[index - 1]!.recordHash),
+      ) ||
+      (expectedSequence === 1
+        ? expectedPreviousHash !== null
+        : !/^0x[0-9a-fA-F]{64}$/.test(expectedPreviousHash ?? '')) ||
+      !fence
+    ) {
+      throw new Error(
+        'Journal append needs contiguous records at the exact expected sequence and predecessor, and a fence.',
+      );
+    }
+    const PK = deploymentKey(scope);
+    const previous = expectedSequence - 1;
+    await dynamodb.send(
+      new TransactWriteCommand({
+        TransactItems: [
+          ...checks(tableName, fence),
+          {
+            Update: {
+              TableName: tableName,
+              Key: { PK, SK: 'J#HEAD' },
+              UpdateExpression: 'SET #sequence = :sequence, #recordHash = :recordHash, #at = :at',
+              ConditionExpression:
+                previous === 0
+                  ? 'attribute_not_exists(#sequence)'
+                  : '#sequence = :previous AND #recordHash = :previousHash',
+              ExpressionAttributeNames: {
+                '#sequence': 'sequence',
+                '#recordHash': 'recordHash',
+                '#at': 'at',
+              },
+              ExpressionAttributeValues: {
+                ':sequence': last.sequence,
+                ':recordHash': last.recordHash,
+                ':at': last.at,
+                ...(previous === 0
+                  ? {}
+                  : { ':previous': previous, ':previousHash': expectedPreviousHash }),
               },
             },
+          },
+          ...records.flatMap((record) => [
             {
               Put: {
                 TableName: tableName,
-                Item: { PK, SK: `J#${String(expectedSequence).padStart(12, '0')}`, record },
+                Item: { PK, SK: `J#${String(record.sequence).padStart(12, '0')}`, record },
                 ConditionExpression: 'attribute_not_exists(PK)',
               },
             },
@@ -441,12 +475,11 @@ export function createAwsBackend({
                   },
                 ]
               : []),
-          ],
-        }),
-      );
-      return record;
-    },
-  };
+          ]),
+        ],
+      }),
+    );
+  }
 
   const journalCipher: JournalCipher = {
     async encrypt(plaintext, context) {

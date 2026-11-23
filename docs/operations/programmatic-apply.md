@@ -29,6 +29,6 @@ const result = await applyPlan({
 
 For named roles, pass `pipeline.named` or `signers.named` as a map of role names to public addresses when planning. Apply accepts `signers.named` as a map of roles to accounts, or `signerRoles.named` as a map of roles to signer-provider role names. The saved addresses must match before any signature. An address shared by several roles has one nonce lane and one spend limit.
 
-The reporter receives JSON-safe events with plan and chain identity, scope, principal, action, sequence, and phase. Events include lock acquisition and renewal, intent, signed, broadcast attempt and result, receipt, verification, resource reuse and resume, recovery, rebroadcast, conflict, and terminal failure. Timing fields include lock wait, journal append, signer, broadcast, and receipt latency. The reporter must not log raw signed bytes.
+The reporter receives JSON-safe events with plan and chain identity, scope, principal, action, sequence, and phase. Events include lock acquisition and renewal, intent, signed, broadcast attempt and result, receipt, verification, resource reuse and resume, recovery, rebroadcast, conflict, and terminal failure. Timing fields include lock wait, journal append, signer, broadcast, and receipt latency. A `step` event gives the name, the wave, and the wall time of one step of apply when it ends, also when it fails. The steps do not overlap, and the apply result lists them in `steps`. The reporter must not log raw signed bytes.
 
 [Previous: AWS permissions](permissions.md) · [Deployment scope](scope-and-recovery.md)

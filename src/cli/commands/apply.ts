@@ -1,6 +1,5 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { createPublicClient, http } from 'viem';
 import { applyPlan } from '../../execution/index.ts';
 import { DEFAULT_VERIFICATION_TIMEOUT_MS } from '../../execution/context.ts';
 import { RETRY_INCONCLUSIVE_READS, createPlan } from '../../planning/index.ts';
@@ -12,6 +11,7 @@ import {
   addressesFromModule,
   backendFromFile,
   planningJournal,
+  publicClient,
   signerFromModule,
   signersFromEnvironment,
   specNeedsOwner,
@@ -61,9 +61,7 @@ export async function apply(context: ChainCommandContext): Promise<void> {
     ...(options['verification-timeout-ms'] === undefined
       ? {}
       : { verificationTimeoutMs: Number(options['verification-timeout-ms']) }),
-    ...(verificationRpcUrl
-      ? { verificationClient: createPublicClient({ transport: http(verificationRpcUrl) }) }
-      : {}),
+    ...(verificationRpcUrl ? { verificationClient: publicClient(verificationRpcUrl) } : {}),
   };
   if (!options.plan && options.pipeline)
     throw new Error('A pipeline apply needs an explicit saved plan with --plan.');

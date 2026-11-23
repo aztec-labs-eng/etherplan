@@ -6,6 +6,39 @@ import { ApplyError } from './errors.ts';
 export const pause = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Runs `work` for each item in order, at most `limit` at a time. After one rejects, it starts no
+ * other item, and it returns only when each started item has settled. An item that did not start
+ * has no result, and the earliest failed item is always the first entry that is not fulfilled.
+ */
+export async function settleBounded<T, R>(
+  items: readonly T[],
+  limit: number,
+  work: (item: T) => Promise<R>,
+): Promise<(PromiseSettledResult<R> | undefined)[]> {
+  const results = new Array<PromiseSettledResult<R> | undefined>(items.length);
+  let next = 0;
+  let failed = false;
+  async function worker(): Promise<void> {
+    while (!failed && next < items.length) {
+      const index = next++;
+      try {
+        results[index] = { status: 'fulfilled', value: await work(items[index]!) };
+      } catch (reason) {
+        failed = true;
+        results[index] = { status: 'rejected', reason };
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+/** Finds the earliest failure in the results of settleBounded. */
+export const isRejected = (
+  result: PromiseSettledResult<unknown> | undefined,
+): result is PromiseRejectedResult => result?.status === 'rejected';
+
 export function transactionFor(item: PreparedAction): PlannedTransaction {
   const transaction = item.planned.tx;
   if (!transaction)
