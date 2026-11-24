@@ -276,8 +276,7 @@ resource "contract" "doubler" {
     succeeded(planned).resources.map((resource) => [resource.id, resource.action]),
     [['contract:doubler', 'deploy']],
   );
-  assert.match(planned.stderr, /Using workspace blue\./);
-  assert.match(planned.stderr, /main\.blue\.ethpvars/);
+  assert.equal(planned.stderr, 'Using workspace blue.\n');
 
   const nonceBefore = await nonce();
   const drifted = run(

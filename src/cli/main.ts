@@ -11,7 +11,6 @@ import {
   selectWorkspace,
   withConfig,
 } from '../input/project.ts';
-import type { VariableValue } from '../input/variables.ts';
 import { graph } from '../spec/index.ts';
 import { adapters } from './commands/adapters.ts';
 import { apply } from './commands/apply.ts';
@@ -49,11 +48,6 @@ import type { CliOptions, CommandName } from './options.ts';
 import { print } from './shared.ts';
 import { formatApplyReport } from './reporting.ts';
 
-function variableReport(variables: VariableValue[]): string {
-  const width = Math.max(...variables.map((variable) => variable.name.length));
-  return `Variables:\n${variables.map((variable) => `  ${variable.name.padEnd(width)} = ${JSON.stringify(variable.value)} from ${variable.source}\n`).join('')}`;
-}
-
 async function run(command: CommandName, options: CliOptions): Promise<void> {
   if (options.rebaseline && command !== 'import')
     throw new Error('--rebaseline applies only to import.');
@@ -84,13 +78,12 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
   if (command === 'output') {
     return output(options, stateFileFor(specFile, options, workspace));
   }
-  const { spec, variables } = await loadProject(specFile, {
+  const { spec } = await loadProject(specFile, {
     workspace,
     varFiles: options['var-file'] ?? [],
     vars: options.var ?? [],
     env: process.env,
   });
-  if (variables.length) process.stderr.write(variableReport(variables));
   if (command === 'init')
     return init({
       options,

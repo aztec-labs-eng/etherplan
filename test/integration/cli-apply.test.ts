@@ -197,11 +197,7 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
     true,
   );
   assert.equal(rerun.status, 0, `${rerun.stderr}\n${rerun.stdout}`);
-  assert.match(rerun.stderr, /^Variables:\n/);
-  assert.doesNotMatch(
-    rerun.stderr,
-    /Applying plan|Apply lock acquired|Still applying|Apply complete/,
-  );
+  assert.equal(rerun.stderr, '');
   const second = JSON.parse(rerun.stdout);
   assert.equal(second.transactionsSigned, 0);
   assert.equal(second.transactions.length, 0);

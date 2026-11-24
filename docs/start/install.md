@@ -5,7 +5,7 @@ Part of [Getting started](index.md).
 Use Node.js 22.18 or newer. Install the current release candidate in the Solidity project where you will run Etherplan:
 
 ```sh
-npm install --save-dev 'github:aztec-labs-eng/etherplan#v0.4.0-rc.5'
+npm install --save-dev 'github:aztec-labs-eng/etherplan#v0.4.0-rc.6'
 npx etherplan --version
 ```
 
