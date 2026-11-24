@@ -35,6 +35,6 @@ A declared variable takes the last value from this list:
 5. each `--var-file path.ethpvars`, in order
 6. each `--var name=value`, in order
 
-The environment and `--var` give strings. A `string` or `any` variable takes the string as written, a `number` or `bool` parses it, and a `list` parses it as an HCL list, such as `--var 'admins=["0x…","0x…"]'`. Only the input that wins is parsed, so a stale `ETHP_VAR_` value that a vars file or flag overrides does no harm. `ETHP_VAR_` names for undeclared variables are ignored. Commands print each variable's value and source on stderr.
+The environment and `--var` give strings. A `string` or `any` variable takes the string as written, a `number` or `bool` parses it, and a `list` parses it as an HCL list, such as `--var 'admins=["0x…","0x…"]'`. Only the input that wins is parsed, so a stale `ETHP_VAR_` value that a vars file or flag overrides does no harm. `ETHP_VAR_` names for undeclared variables are ignored.
 
 [Previous: HCL projects](hcl.md) · [Next: CREATE2 salts](salts.md)

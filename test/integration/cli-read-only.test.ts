@@ -23,7 +23,7 @@ function runCli(...arguments_) {
 
 function parseSuccess(result) {
   assert.equal(result.status, 0, result.stderr);
-  assert.ok(result.stderr === '' || result.stderr.startsWith('Variables:\n'));
+  assert.equal(result.stderr, '');
   return JSON.parse(result.stdout);
 }
 
