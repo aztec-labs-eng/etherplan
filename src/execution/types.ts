@@ -442,6 +442,7 @@ export interface ReceiptJson {
 
 /** What summarizeVerification keeps of a VerificationResult for journal and report output. */
 export interface VerificationSummary {
+  bindingState?: BindingObservation;
   status: VerificationStatus;
   address: Address;
   codeHash: Hash | null;

@@ -114,6 +114,7 @@ function planResource(
       'check',
       'before',
       'after',
+      'additionalChecks',
       'signerRole',
       'ownerOnly',
       'transfersOwnership',
@@ -126,7 +127,7 @@ function planResource(
 }
 
 function bindingState(observation: VerificationResult): BindingObservation | null {
-  return observation.bindingChecks?.[0]?.observed ?? null;
+  return observation.bindingState ?? observation.bindingChecks?.[0]?.observed ?? null;
 }
 
 function decide(
@@ -145,7 +146,8 @@ function decide(
     if (state === 'before') return 'call';
     if (
       state === 'read-failed' &&
-      observation.bindingChecks?.[0]?.targetAbsent === true &&
+      observation.bindingChecks.length > 0 &&
+      observation.bindingChecks.every((check) => check.targetAbsent === true) &&
       ['deploy', 'verify'].includes(plannedById.get(resource.targetId)?.action ?? '')
     )
       return 'call';

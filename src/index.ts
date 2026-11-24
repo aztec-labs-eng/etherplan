@@ -70,6 +70,8 @@ export type {
   ParsedSpec,
   SaltDerivation,
   SpecCall,
+  SpecCallBinding,
+  SpecRevert,
   SpecContract,
   SpecExternal,
 } from './spec/types.ts';

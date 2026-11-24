@@ -12,6 +12,7 @@ import { decodeMetadataTail } from './metadata.ts';
 import { readSource } from './shared-reads.ts';
 import { replayProviderFailure, simulateCreate2 } from './simulate.ts';
 import { abiArguments, normalizeOutputs, safeError, sameJson } from './values.ts';
+import { expectedRevert, revertData } from './reverts.ts';
 import { abiFunction } from '../validation/index.ts';
 import { DEFAULT_FACTORY } from '../spec/index.ts';
 import { validateCreationProof } from './creation-proof.ts';
@@ -811,6 +812,38 @@ async function verifyCall(
   client: Client,
   options: VerifyOptions,
 ): Promise<VerificationResult> {
+  if (resource.additionalChecks) {
+    if (options.blockNumber === undefined)
+      options = { ...options, blockNumber: (await client.getBlock({ blockTag: 'latest' })).number };
+    const { additionalChecks, ...base } = resource;
+    const bindings = [base, ...additionalChecks.map((binding) => ({ ...base, ...binding }))];
+    const results: VerificationResult[] = [];
+    for (const binding of bindings) results.push(await verifyCall(binding, client, options));
+    const result = results[0]!;
+    const allAfter = results.every((item) => item.bindingChecks[0]?.observed === 'after');
+    const allBefore = results.every((item, index) => {
+      const observed = item.bindingChecks[0]!;
+      return (
+        observed.observed === 'before' ||
+        (observed.observed === 'after' &&
+          Boolean(bindings[index]!.before.revert) === Boolean(bindings[index]!.after.revert) &&
+          sameJson(observed.expectedBefore, observed.expectedAfter))
+      );
+    });
+    result.bindingState = allAfter
+      ? 'after'
+      : allBefore
+        ? 'before'
+        : results.every((item) => item.bindingChecks[0]?.targetAbsent)
+          ? 'read-failed'
+          : 'other';
+    result.bindingChecks = results.flatMap((item) => item.bindingChecks);
+    result.missingProofs = results.flatMap((item) => item.missingProofs);
+    result.reasons = results.flatMap((item) => item.reasons);
+    if (result.bindingState === 'other' && result.reasons.length === 0)
+      result.reasons.push('Getter checks do not match one complete before or after snapshot.');
+    return finish(result);
+  }
   const result = newResult(resource);
   const blockNumber = blockOf(options.blockNumber);
   const after = resource.after;
@@ -830,14 +863,16 @@ async function verifyCall(
     (resource as PreparedCall & { artifact?: NormalizedArtifact }).artifact?.abi;
   const args = after.args ?? [];
   const fn = abiFunction(abi, after.functionName, args.length, resource.id);
-  const expectedAfter = normalizeOutputs(
-    fn.outputs ?? [],
-    after.expected,
-    `${resource.id} after.expected`,
-  );
-  const expectedBefore = before.absent
-    ? null
-    : normalizeOutputs(fn.outputs ?? [], before.expected, `${resource.id} before.expected`);
+  const afterRevert = after.revert ? expectedRevert(abi, after.revert, resource.id) : undefined;
+  const beforeRevert = before.revert ? expectedRevert(abi, before.revert, resource.id) : undefined;
+  const expectedAfter = afterRevert
+    ? { revert: afterRevert }
+    : normalizeOutputs(fn.outputs ?? [], after.expected, `${resource.id} after.expected`);
+  const expectedBefore = beforeRevert
+    ? { revert: beforeRevert }
+    : before.absent
+      ? null
+      : normalizeOutputs(fn.outputs ?? [], before.expected, `${resource.id} before.expected`);
   const binding: BindingCheck = {
     name: resource.id,
     functionName: after.functionName,
@@ -864,6 +899,7 @@ async function verifyCall(
   }
   result.codeHash = keccak256(code);
   result.codeComparison = { mode: 'presence', matched: true };
+  let reverted = false;
   try {
     binding.actual = normalizeOutputs(
       fn.outputs ?? [],
@@ -871,13 +907,21 @@ async function verifyCall(
       `${resource.id} ${after.functionName}`,
     );
   } catch (error) {
-    readFailed(options, error);
-    binding.error = safeError(error);
-    result.reasons.push(`Binding read ${after.functionName} failed: ${binding.error}`);
-    return finish(result);
+    const raw = revertData(error);
+    if (raw !== undefined && (raw === beforeRevert || raw === afterRevert)) {
+      binding.actual = { revert: raw };
+      reverted = true;
+    } else {
+      readFailed(options, error);
+      binding.error = safeError(error);
+      result.reasons.push(`Binding read ${after.functionName} failed: ${binding.error}`);
+      return finish(result);
+    }
   }
-  if (sameJson(binding.actual, expectedAfter)) binding.observed = 'after';
-  else if (sameJson(binding.actual, expectedBefore)) binding.observed = 'before';
+  if (reverted === Boolean(afterRevert) && sameJson(binding.actual, expectedAfter))
+    binding.observed = 'after';
+  else if (reverted === Boolean(beforeRevert) && sameJson(binding.actual, expectedBefore))
+    binding.observed = 'before';
   else binding.observed = 'other';
   if (binding.observed === 'before')
     result.missingProofs.push(

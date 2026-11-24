@@ -54,6 +54,13 @@ export type PreparedBinding = {
   functionName: string;
   args: JsonValue[];
   expected: JsonValue;
+  revert?: { error: string; args: JsonValue[] };
+};
+
+export type PreparedCallBinding = {
+  check: PreparedCallCheck;
+  before: PreparedBinding;
+  after: PreparedBinding;
 };
 
 interface PreparedBase {
@@ -114,6 +121,7 @@ export interface PreparedCall extends PreparedBase {
   check: PreparedCallCheck;
   before: PreparedBinding;
   after: PreparedBinding;
+  additionalChecks?: PreparedCallBinding[];
   /** Defaults to `owner`. */
   signerRole: string;
   /** The next two are present only when the spec uses the dependency plan. */
@@ -243,6 +251,7 @@ export interface PlannedCall extends PlannedBase {
   check: PreparedCallCheck;
   before: PreparedBinding;
   after: PreparedBinding;
+  additionalChecks?: PreparedCallBinding[];
   signerRole: string;
   ownerOnly?: boolean;
   transfersOwnership?: boolean;

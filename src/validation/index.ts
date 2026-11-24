@@ -3,6 +3,7 @@ import { isUserAddress } from '../address.ts';
 import { assertAbi } from '../artifacts.ts';
 import { linkBytecode } from '../verification/bytecode.ts';
 import { abiArguments, normalizeOutputs } from '../verification/values.ts';
+import { expectedRevert } from '../verification/reverts.ts';
 import type { AbiFunction, AbiParameter } from 'viem';
 import type { LinkReferences, NormalizedArtifact } from '../artifacts/types.ts';
 import type { PreparedResource } from '../planning/types.ts';
@@ -176,10 +177,28 @@ export function validateResources(resources: PreparedResource[]): PreparedResour
         validateCheck(resource.abi, check, `${resource.id} check ${check.functionName}`);
     } else if (resource.kind === 'call') {
       const abi = resource.abi ?? resource.targetArtifact?.abi;
-      const name = resource.after.functionName;
-      validateCheck(abi, resource.after, `${resource.id} check ${name} after`);
-      if (!resource.before.absent)
-        validateCheck(abi, resource.before, `${resource.id} check ${name} before`);
+      for (const binding of [resource, ...(resource.additionalChecks ?? [])]) {
+        const name = binding.after.functionName;
+        for (const [phase, expected] of [
+          ['after', binding.after],
+          ['before', binding.before],
+        ] as const) {
+          if (expected.absent) continue;
+          if (expected.revert) {
+            const fn = abiFunction(abi, name, expected.args.length, resource.id);
+            assert(
+              ['view', 'pure'].includes(fn.stateMutability),
+              `${resource.id} check ${name} must be view or pure.`,
+            );
+            encodeFunctionData({
+              abi: [fn],
+              functionName: name,
+              args: abiArguments(fn.inputs, expected.args),
+            });
+            expectedRevert(abi, expected.revert, `${resource.id} check ${name} ${phase}`);
+          } else validateCheck(abi, expected, `${resource.id} check ${name} ${phase}`);
+        }
+      }
       encodeMethod(abi, resource.method, resource.args, resource.id);
     }
   }

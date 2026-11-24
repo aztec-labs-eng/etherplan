@@ -121,6 +121,7 @@ const CALL_ORDER = [
   'args',
   'check',
   'before',
+  'additionalChecks',
   'after',
   'signerRole',
   'ownerOnly',
@@ -134,6 +135,8 @@ const CALL_CHECK_FIELDS = new Set([
   'args',
   'before',
   'before_absent',
+  'before_revert',
+  'after_revert',
   'address',
   'equals',
 ]);
@@ -284,10 +287,12 @@ function checkShape(block: HclBlock, { root, id }: Target): void {
       );
     }
     assert(
-      ['getter', 'equals'].every((field) => attributes.has(field)) &&
-        attributes.has('before') !== attributes.has('before_absent'),
+      attributes.has('getter') &&
+        ['equals', 'after_revert'].filter((field) => attributes.has(field)).length === 1 &&
+        ['before', 'before_absent', 'before_revert'].filter((field) => attributes.has(field))
+          .length === 1,
       block,
-      `${what} targets a call and needs getter, before, and equals.`,
+      `${what} targets a call and needs getter, before, and equals (or one before_revert/before_absent and one after_revert).`,
     );
     return;
   }
@@ -331,23 +336,30 @@ function foldCheck(
   if (target.root === 'calls') {
     const call = resources.calls.get(target.name);
     assert(call, block, `Missing ${target.id}.`);
-    assert(
-      !call.check,
-      block,
-      `${target.id} has more than one check block: ${call.checkBlock} and ${name}.`,
-    );
-    call.checkBlock = name;
-    call.check = {
+    const check = {
       ...(attributes.has('address')
         ? { address: evaluator.value(get('address')!, 'address') }
         : {}),
       function: evaluator.constant(get('getter')!, 'getter'),
       args: attributes.has('args') ? evaluator.value(get('args')!, 'args') : [],
-      equals: evaluator.value(get('equals')!, 'equals'),
+      ...(attributes.has('after_revert')
+        ? { revert: evaluator.value(get('after_revert')!, 'after_revert') }
+        : { equals: evaluator.value(get('equals')!, 'equals') }),
     };
-    call.before = attributes.has('before_absent')
+    const before = attributes.has('before_absent')
       ? { absent: evaluator.constant(get('before_absent')!, 'before_absent') }
-      : { equals: evaluator.value(get('before')!, 'before') };
+      : attributes.has('before_revert')
+        ? { revert: evaluator.value(get('before_revert')!, 'before_revert') }
+        : { equals: evaluator.value(get('before')!, 'before') };
+    if (call.check) {
+      call.additionalChecks ??= [];
+      assert(Array.isArray(call.additionalChecks), block, 'Additional checks must be an array.');
+      call.additionalChecks.push({ check, before });
+    } else {
+      call.checkBlock = name;
+      call.check = check;
+      call.before = before;
+    }
     return;
   }
   let getters: [string, HclExpression, Located][];

@@ -74,6 +74,7 @@ export async function timed<T>(
 export function summarizeVerification(verification: VerificationResult): VerificationSummary {
   return jsonSafe({
     status: verification.status,
+    ...(verification.bindingState ? { bindingState: verification.bindingState } : {}),
     address: verification.address,
     codeHash: verification.codeHash,
     codeComparison: verification.codeComparison,

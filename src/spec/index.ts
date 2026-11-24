@@ -210,7 +210,10 @@ function validateReferences(spec: ParsedSpec): void {
   for (const [name, item] of Object.entries(spec.externals))
     candidates.push([`external:${name}`, [item.checks]]);
   for (const item of spec.calls)
-    candidates.push([`call:${item.id}`, [item.args, item.check, item.before]]);
+    candidates.push([
+      `call:${item.id}`,
+      [item.args, item.check, item.before, item.additionalChecks],
+    ]);
 
   const resourceIds = new Set([
     ...spec.contracts.map((item) => `contract:${item.id}`),
@@ -550,6 +553,7 @@ export function parseSpec(raw: unknown): ParsedSpec {
         'args',
         'check',
         'before',
+        'additionalChecks',
         'after',
         'signerRole',
         'ownerOnly',
@@ -576,27 +580,56 @@ export function parseSpec(raw: unknown): ParsedSpec {
     if (item.abi !== undefined) assert(Array.isArray(item.abi), `${fullId} abi must be an array.`);
     assert(typeof item.method === 'string' && item.method.length > 0, `${fullId} needs a method.`);
     assert(Array.isArray(item.args), `${fullId} needs args.`);
-    assert(isObject(item.check), `${fullId} needs a check predicate.`);
-    assertKeys(item.check, new Set(['function', 'args', 'equals', 'address']), `${fullId} check`);
-    assert(
-      typeof item.check.function === 'string' &&
-        item.check.function.length > 0 &&
-        Object.hasOwn(item.check, 'equals'),
-      `${fullId} needs check.function and check.equals.`,
-    );
-    item.check.args ??= [];
-    assert(Array.isArray(item.check.args), `${fullId} check.args must be an array.`);
-    assert(isObject(item.before), `${fullId} needs a before predicate.`);
-    assertKeys(item.before, new Set(['equals', 'absent']), `${fullId} before`);
-    assert(
-      Object.hasOwn(item.before, 'equals') !== Object.hasOwn(item.before, 'absent'),
-      `${fullId} needs before.equals or before.absent.`,
-    );
-    if (Object.hasOwn(item.before, 'absent'))
+    if (item.additionalChecks !== undefined) {
       assert(
-        item.before.absent === true && Object.hasOwn(item.check, 'address'),
-        `${fullId} before.absent needs a check address.`,
+        Array.isArray(item.additionalChecks) && item.additionalChecks.length > 0,
+        `${fullId} additionalChecks must be a nonempty array.`,
       );
+      for (const binding of item.additionalChecks) {
+        assert(isObject(binding), `${fullId} additional check must be an object.`);
+        assertKeys(binding, new Set(['check', 'before']), `${fullId} additional check`);
+      }
+    }
+    for (const binding of [item, ...(item.additionalChecks ?? [])]) {
+      assert(isObject(binding), `${fullId} check must be an object.`);
+      const { check, before } = binding;
+      assert(isObject(check), `${fullId} needs a check predicate.`);
+      assertKeys(
+        check,
+        new Set(['function', 'args', 'equals', 'address', 'revert']),
+        `${fullId} check`,
+      );
+      assert(
+        typeof check.function === 'string' &&
+          check.function.length > 0 &&
+          Object.hasOwn(check, 'equals') !== Object.hasOwn(check, 'revert'),
+        `${fullId} needs check.function and check.equals.`,
+      );
+      check.args ??= [];
+      assert(Array.isArray(check.args), `${fullId} check.args must be an array.`);
+      assert(isObject(before), `${fullId} needs a before predicate.`);
+      assertKeys(before, new Set(['equals', 'absent', 'revert']), `${fullId} before`);
+      assert(
+        ['equals', 'absent', 'revert'].filter((key) => Object.hasOwn(before, key)).length === 1,
+        `${fullId} needs before.equals or before.absent.`,
+      );
+      if (Object.hasOwn(before, 'absent'))
+        assert(
+          before.absent === true && Object.hasOwn(check, 'address'),
+          `${fullId} before.absent needs a check address.`,
+        );
+      for (const expected of [check.revert, before.revert]) {
+        if (expected === undefined) continue;
+        assert(isObject(expected), `${fullId} revert must be an object.`);
+        assertKeys(expected, new Set(['error', 'args']), `${fullId} revert`);
+        assert(
+          typeof expected.error === 'string' && expected.error.length > 0,
+          `${fullId} revert needs an error name.`,
+        );
+        expected.args ??= [];
+        assert(Array.isArray(expected.args), `${fullId} revert.args must be an array.`);
+      }
+    }
     if (item.after !== undefined) assertAfter(item.after, `${fullId} after`);
     if (item.signerRole !== undefined)
       assert(
@@ -719,6 +752,7 @@ export function graph(spec: ParsedSpec): OrderedNode[] {
               ['args', node.item.args],
               ['check', node.item.check],
               ['before', node.item.before],
+              ['additionalChecks', node.item.additionalChecks],
             ];
     for (const [field, value] of fields) {
       for (const { reference, requiresLive, location } of referenceDetails(value, field)) {
@@ -836,7 +870,7 @@ export function impact(spec: ParsedSpec, ordered: OrderedNode[], reference: stri
         ? [node.item.address, node.item.args, node.item.libraries, node.item.checks]
         : node.kind === 'external'
           ? [node.item.checks]
-          : [node.item.args, node.item.check, node.item.before];
+          : [node.item.args, node.item.check, node.item.before, node.item.additionalChecks];
     if (
       references(inputs).has(reference) ||
       node.resolutionDependencies.some((dependency) => affected.has(dependency))

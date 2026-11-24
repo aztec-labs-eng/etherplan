@@ -191,6 +191,7 @@ export interface VerificationEvidence {
 
 /** Plain JSON, so the same shape serves plan observations, proofHash inputs, and journal summaries. */
 export interface VerificationResult {
+  bindingState?: BindingObservation;
   id: ResourceId;
   address: Address;
   codeHash: Hash | null;

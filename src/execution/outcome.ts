@@ -296,7 +296,12 @@ export async function precondition(
     observed.every((state) => state === 'after')
   )
     return { satisfied: true, verification };
-  if (observed.length > 0 && observed.every((state) => state === 'before'))
+  if (
+    verification.bindingState === 'before' ||
+    (!verification.bindingState &&
+      observed.length > 0 &&
+      observed.every((state) => state === 'before'))
+  )
     return { satisfied: false, verification };
   return fail(
     ctx,

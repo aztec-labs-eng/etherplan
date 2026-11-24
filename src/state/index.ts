@@ -498,6 +498,7 @@ function desiredInputs(resource: PreparedResource): JsonValue {
       check: resource.check,
       before: resource.before,
       after: resource.after,
+      ...(resource.additionalChecks ? { additionalChecks: resource.additionalChecks } : {}),
       signerRole: resource.signerRole,
     };
   }

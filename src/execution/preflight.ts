@@ -62,6 +62,7 @@ const IDENTITY_FIELDS = [
   'check',
   'before',
   'after',
+  'additionalChecks',
   'ownerOnly',
   'transfersOwnership',
 ];

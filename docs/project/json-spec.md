@@ -6,6 +6,8 @@ Part of [Project files](index.md).
 
 A contract names a compiled JSON artifact and has either an existing `address` or a CREATE2 `salt`. A deployable contract has constructor `args`. A call declares its target, method, arguments, allowed `before` getter value, and desired getter value in `check`. Derived salts record their `mixer` and optional `label` alongside the hash.
 
+A call can declare `before.revert` instead of `before.equals`, or `check.revert` instead of `check.equals`. Each revert is `{ "error": "Missing", "args": [1] }` and uses a custom error from the call ABI. A call with several checks keeps its first `check` and `before` and adds `additionalChecks`, an array of `{ "check": { ... }, "before": { ... } }` entries. HCL check names select a stable order. This keeps the existing single-check shape and saved-plan identities. Every additional check participates in reference resolution, validation, planning, verification, recovery, and state identity. See [call checks](resources.md#calls-and-checks) for the complete-snapshot rules and limits.
+
 The [neutral state fixture](../../test/fixtures/state-fixture.json) and [parallel fixture](../../test/fixtures/parallel-lab.json) show complete JSON inputs. They are test fixtures, not deployment recommendations. Keep signer secrets outside the spec.
 
 For the meaning of `dependencyMode`, `requiresLive`, `after`, and `executionAssumptions`, follow [Dependencies and execution order](../dependencies/index.md).

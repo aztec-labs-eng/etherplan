@@ -492,15 +492,6 @@ test('invalid .ethp and .ethpvars inputs fail with specific errors', async () =>
       /call:configure needs one check block with target = calls\.configure/,
     ],
     [
-      'two call checks',
-      base({
-        extra:
-          'resource "check" "again" {\n target = calls.configure\n getter = "x"\n before = 1\n equals = 2\n}',
-      }),
-      owner,
-      /call:configure has more than one check block: again and configured/,
-    ],
-    [
       'call check fields',
       base().replace('before = false', ''),
       owner,

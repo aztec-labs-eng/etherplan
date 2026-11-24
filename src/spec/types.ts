@@ -88,15 +88,26 @@ export interface SaltDerivation {
   generation?: number;
 }
 
+export interface SpecRevert {
+  error: string;
+  args: SpecValue[];
+}
+
 export interface SpecCallCheck {
   address?: SpecValue;
   function: string;
   /** Defaults to `[]` in parseSpec. */
   args: SpecValue[];
-  equals: SpecValue;
+  equals?: SpecValue;
+  revert?: SpecRevert;
 }
 
-export interface SpecCall {
+export interface SpecCallBinding {
+  check: SpecCallCheck;
+  before: { equals?: SpecValue; absent?: true; revert?: SpecRevert };
+}
+
+export interface SpecCall extends SpecCallBinding {
   /** Required for calls on constructor-created children; optional explicit ABI for other targets. */
   abi?: Abi;
   id: string;
@@ -104,8 +115,7 @@ export interface SpecCall {
   target: string;
   method: string;
   args: SpecValue[];
-  check: SpecCallCheck;
-  before: { equals?: SpecValue; absent?: true };
+  additionalChecks?: SpecCallBinding[];
   after?: ResourceId[];
   signerRole?: string;
   ownerOnly?: boolean;

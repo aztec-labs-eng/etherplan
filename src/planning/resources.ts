@@ -14,6 +14,7 @@ import type {
   ParsedSpec,
   ResolvedAddresses,
   SpecChecks,
+  SpecCallBinding,
   SpecContract,
 } from '../spec/types.ts';
 import type { Address, Hash, Hex, JsonValue, ResourceId } from '../types.ts';
@@ -22,6 +23,7 @@ import type {
   PreparedBinding,
   PreparedCall,
   PreparedCallCheck,
+  PreparedCallBinding,
   PreparedCheck,
   PreparedContract,
   PreparedExternal,
@@ -197,32 +199,60 @@ function buildCall(
   assert(!info.getter || child, `${node.id} has no pinned created getter ${info.getter}.`);
   const abi = item.abi ?? (target.kind === 'contract' ? target.artifact.abi : target.abi);
   assert(abi, `${node.id} target needs an ABI.`);
-  const checkArgs = resolve(item.check.args, spec, addresses);
-  const checkAddress =
-    item.check.address === undefined ? undefined : resolve(item.check.address, spec, addresses);
-  assert(
-    checkAddress === undefined || (typeof checkAddress === 'string' && isAddress(checkAddress)),
-    `${node.id} has an invalid check address.`,
-  );
-  const checkAt = checkAddress === undefined ? {} : { address: checkAddress as Address };
-  const after: PreparedBinding = {
-    ...checkAt,
-    functionName: item.check.function,
-    args: checkArgs,
-    expected: resolve(item.check.equals, spec, addresses),
+  const prepareBinding = (binding: SpecCallBinding): PreparedCallBinding => {
+    const { check: predicate, before: previous } = binding;
+    const revert = (expected: NonNullable<typeof previous.revert>) => ({
+      error: expected.error,
+      args: resolve(expected.args, spec, addresses),
+    });
+    const checkArgs = resolve(predicate.args, spec, addresses);
+    const checkAddress =
+      predicate.address === undefined ? undefined : resolve(predicate.address, spec, addresses);
+    assert(
+      checkAddress === undefined || (typeof checkAddress === 'string' && isAddress(checkAddress)),
+      `${node.id} has an invalid check address.`,
+    );
+    const checkAt = checkAddress === undefined ? {} : { address: checkAddress as Address };
+    const after: PreparedBinding = {
+      ...checkAt,
+      functionName: predicate.function,
+      args: checkArgs,
+      expected: predicate.revert ? null : resolve(predicate.equals!, spec, addresses),
+      ...(predicate.revert ? { revert: revert(predicate.revert) } : {}),
+    };
+    const before: PreparedBinding = {
+      ...checkAt,
+      ...(previous.absent ? { absent: true as const } : {}),
+      functionName: predicate.function,
+      args: checkArgs,
+      expected:
+        previous.absent || previous.revert ? null : resolve(previous.equals!, spec, addresses),
+      ...(previous.revert ? { revert: revert(previous.revert) } : {}),
+    };
+    const check: PreparedCallCheck = {
+      ...checkAt,
+      functionName: predicate.function,
+      args: checkArgs,
+    };
+    return { check, before, after };
   };
-  const before: PreparedBinding = {
-    ...checkAt,
-    ...(item.before.absent ? { absent: true as const } : {}),
-    functionName: item.check.function,
-    args: checkArgs,
-    expected: item.before.absent ? null : resolve(item.before.equals!, spec, addresses),
-  };
-  const check: PreparedCallCheck = {
-    ...checkAt,
-    functionName: item.check.function,
-    args: checkArgs,
-  };
+  const { check, before, after } = prepareBinding(item);
+  const additionalChecks = item.additionalChecks?.map(prepareBinding);
+  if (additionalChecks) {
+    const bindings = [{ check, before, after }, ...additionalChecks];
+    const address = (after.address ?? (child ? child.address : target.address)).toLowerCase();
+    assert(
+      bindings.every(
+        (binding) =>
+          !binding.before.absent &&
+          (binding.after.address ?? (child ? child.address : target.address)).toLowerCase() ===
+            address,
+      ),
+      `${node.id} grouped checks need one checked address and cannot use before.absent.`,
+    );
+    const keys = bindings.map((binding) => JSON.stringify(binding.check));
+    assert(new Set(keys).size === keys.length, `${node.id} has duplicate getter checks.`);
+  }
   const resource: PreparedCall = {
     id: node.id,
     kind: 'call',
@@ -237,6 +267,7 @@ function buildCall(
     check,
     before,
     after,
+    ...(additionalChecks ? { additionalChecks } : {}),
     signerRole: item.signerRole ?? 'owner',
     ...(describeDependencies
       ? {
