@@ -169,6 +169,28 @@ test('expected reverts match complete error data, never arbitrary errors with da
   }
 });
 
+test('expected errors work across separate Viem copies without accepting transport errors', async () => {
+  const { call } = setup();
+  const foreign = (name, raw) =>
+    new Error('read failed', {
+      cause: Object.assign(new Error('reverted'), { name, raw }),
+    });
+  assert.equal(
+    (
+      await verifyResource(
+        call,
+        client([foreign('ContractFunctionRevertedError', missing(1).raw), missing(2), 7n]),
+      )
+    ).status,
+    'unverified',
+  );
+  for (const error of [
+    foreign('ContractFunctionRevertedError', missing(9).raw),
+    foreign('RpcRequestError', missing(1).raw),
+  ])
+    assert.equal((await verifyResource(call, client([error, missing(2), 7n]))).status, 'conflict');
+});
+
 test('a declared missing result can be required after a write', async () => {
   const absent = `resource "check" "absent" {
     target = calls.configure

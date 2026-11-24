@@ -1,4 +1,4 @@
-import { BaseError, ContractFunctionRevertedError, encodeErrorResult } from 'viem';
+import { encodeErrorResult } from 'viem';
 import { abiArguments } from './values.ts';
 import type { Abi, Hex, JsonValue } from '../types.ts';
 
@@ -20,9 +20,17 @@ export function expectedRevert(
 }
 
 export function revertData(error: unknown): Hex | undefined {
-  if (!(error instanceof BaseError)) return undefined;
-  const reverted = error.walk((cause) => cause instanceof ContractFunctionRevertedError);
-  return reverted instanceof ContractFunctionRevertedError
-    ? (reverted.raw?.toLowerCase() as Hex | undefined)
-    : undefined;
+  const seen = new Set<object>();
+  while (error !== null && typeof error === 'object' && !seen.has(error)) {
+    seen.add(error);
+    const current = error as { name?: unknown; raw?: unknown; cause?: unknown };
+    if (
+      current.name === 'ContractFunctionRevertedError' &&
+      typeof current.raw === 'string' &&
+      /^0x(?:[0-9a-fA-F]{2})+$/.test(current.raw)
+    )
+      return current.raw.toLowerCase() as Hex;
+    error = current.cause;
+  }
+  return undefined;
 }
