@@ -1,4 +1,5 @@
 // Shapes of a parsed specification and its dependency graph. Source of truth: parseSpec and graph in index.ts.
+import type { ProjectModules } from './modules.ts';
 import type {
   Abi,
   Address,
@@ -58,6 +59,7 @@ export interface SpecContract {
   checks?: SpecChecks;
   after?: ResourceId[];
   codeHash?: Hash;
+  createdBy?: CallId;
   creationProofMode?: 'pinned-runtime';
   createdCode?: SpecCreatedCode[];
   /** Matches `/^[a-z][a-z0-9_-]*$/`; the scheduler has lanes only for `deployer` and `owner`. */
@@ -86,21 +88,34 @@ export interface SaltDerivation {
   generation?: number;
 }
 
+export interface SpecRevert {
+  error: string;
+  args: SpecValue[];
+}
+
 export interface SpecCallCheck {
+  address?: SpecValue;
   function: string;
   /** Defaults to `[]` in parseSpec. */
   args: SpecValue[];
-  equals: SpecValue;
+  equals?: SpecValue;
+  revert?: SpecRevert;
 }
 
-export interface SpecCall {
+export interface SpecCallBinding {
+  check: SpecCallCheck;
+  before: { equals?: SpecValue; absent?: true; revert?: SpecRevert };
+}
+
+export interface SpecCall extends SpecCallBinding {
+  /** Required for calls on constructor-created children; optional explicit ABI for other targets. */
+  abi?: Abi;
   id: string;
   /** Contract name without the `contract:` prefix. */
   target: string;
   method: string;
   args: SpecValue[];
-  check: SpecCallCheck;
-  before: { equals: SpecValue };
+  additionalChecks?: SpecCallBinding[];
   after?: ResourceId[];
   signerRole?: string;
   ownerOnly?: boolean;
@@ -112,9 +127,9 @@ export interface Factory {
   codeHash: Hash;
 }
 
-/** A declared reason why a constructor or library reference needs no execution edge. */
+/** A declared reason why a constructor, method argument or library reference needs no execution edge. */
 export interface ExecutionAssumption {
-  consumer: `contract:${string}`;
+  consumer: `contract:${string}` | `call:${string}`;
   location: string;
   reference: string;
   reason: string;
@@ -122,6 +137,7 @@ export interface ExecutionAssumption {
 
 export interface ParsedSpec {
   schema: SchemaVersion;
+  modules?: ProjectModules;
   chainId: number;
   dependencyMode?: DependencyMode;
   executionAssumptions?: ExecutionAssumption[];

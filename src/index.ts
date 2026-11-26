@@ -41,6 +41,11 @@ export {
   validateJournal,
 } from './execution/backends.ts';
 export { createAwsBackend } from './execution/aws.ts';
+export {
+  moveScopeResource,
+  pullDeploymentScope,
+  pushDeploymentScope,
+} from './execution/scope-transfer.ts';
 export { createSignerServiceProvider } from './execution/signer-service.ts';
 export { createKmsSignerProvider } from './execution/kms-signer.ts';
 
@@ -65,6 +70,8 @@ export type {
   ParsedSpec,
   SaltDerivation,
   SpecCall,
+  SpecCallBinding,
+  SpecRevert,
   SpecContract,
   SpecExternal,
 } from './spec/types.ts';
@@ -122,3 +129,11 @@ export type {
   StateStore,
   StoredJournalRecord,
 } from './execution/types.ts';
+
+export { loadSpec, loadProject, compileProjectFile } from './input/project.ts';
+export { moduleResourceId } from './input/modules.ts';
+export type { ModuleBinding, ModuleInstance, ProjectModules } from './spec/modules.ts';
+export { parseHcl } from './input/hcl.ts';
+export type { HclBlock, HclExpression } from './input/types.ts';
+export { loadArtifacts } from './artifacts.ts';
+export { hashJson } from './identity.ts';

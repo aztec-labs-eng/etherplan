@@ -23,9 +23,11 @@ import type {
   JournalStore,
   Lock,
   PreparedAction,
+  Receipt,
   ReportEvent,
   ResourceOutcome,
   SentTransaction,
+  SignedIndexEntry,
   SignerAccount,
   SignerAuthorization,
   SignerLanes,
@@ -33,6 +35,8 @@ import type {
   SignerRoles,
   Signers,
   StateWriteResult,
+  StepTiming,
+  StoredJournalRecord,
 } from './types.ts';
 
 /** Initialized once after the lock and journal are open; run fills the preflight fields. */
@@ -59,17 +63,25 @@ export interface ApplyContext {
   sent: SentTransaction[];
   rebroadcasts: { actionId: ResourceId; transactionHash: Hash }[];
   outcomes: Map<ResourceId, ResourceOutcome>;
+  validatedReceipts?: Map<Hash, Receipt>;
+  signerHistory?: {
+    signers: Map<string, { entries: SignedIndexEntry[]; sequence: number }>;
+    journals: Map<string, StoredJournalRecord[]>;
+  };
   timings: ApplyTimings;
+  steps: StepTiming[];
   state: StateWriteResult;
   prepared: Map<ResourceId, PreparedAction>;
   stateSnapshot: StateFile | null;
   schedule: Schedule | null;
 }
 
+export const DEFAULT_VERIFICATION_TIMEOUT_MS = 300_000;
+
 const DEFAULTS = {
   pollIntervalMs: 250,
   receiptTimeoutMs: 120_000,
-  verificationTimeoutMs: 300_000,
+  verificationTimeoutMs: DEFAULT_VERIFICATION_TIMEOUT_MS,
   gasMultiplier: 1.2,
   baseFeeMultiplier: DEFAULT_BASE_FEE_MULTIPLIER,
   fees: null,
@@ -81,7 +93,12 @@ const DEFAULTS = {
 function lanesFrom(signers: Signers | undefined, parallel: boolean): SignerLanes {
   if (!signers || !Array.isArray(signers.deployer) || signers.deployer.length === 0)
     throw new ApplyError('signer', 'Apply needs signers.deployer with at least one account.');
-  const accounts = [...signers.deployer, ...(signers.owner ? [signers.owner] : [])];
+  const named = signers.named ?? {};
+  const accounts = [
+    ...signers.deployer,
+    ...(signers.owner ? [signers.owner] : []),
+    ...Object.values(named),
+  ];
   for (const account of accounts) {
     if (!isUserAddress(account?.address ?? '') || typeof account.signTransaction !== 'function')
       throw new ApplyError(
@@ -98,6 +115,7 @@ function lanesFrom(signers: Signers | undefined, parallel: boolean): SignerLanes
   return {
     pool: parallel ? signers.deployer : [signers.deployer[0]!],
     owner: signers.owner ?? null,
+    named,
     byAddress,
   };
 }
@@ -144,7 +162,26 @@ async function signersFromProvider(
     plan?.resources?.some(
       (resource) => ['deploy', 'call'].includes(resource.action) && roleOf(resource) === 'owner',
     );
-  return { deployer, ...(needsOwner ? { owner: await account(roles?.owner ?? 'owner') } : {}) };
+  const names = new Set([
+    ...Object.keys((plan.pipeline ?? plan.signers)?.named ?? {}),
+    ...plan.resources
+      .filter((resource) => ['deploy', 'call'].includes(resource.action))
+      .map(roleOf)
+      .filter((role) => !['owner', 'deployer'].includes(role)),
+  ]);
+  const named = Object.fromEntries(
+    await Promise.all(
+      [...names].map(async (role) => [
+        role,
+        await account(roles?.named && Object.hasOwn(roles.named, role) ? roles.named[role]! : role),
+      ]),
+    ),
+  );
+  return {
+    deployer,
+    ...(needsOwner ? { owner: await account(roles?.owner ?? 'owner') } : {}),
+    ...(names.size ? { named } : {}),
+  };
 }
 
 /** Owns the acquired lock and open journal until close is called. */
@@ -331,6 +368,7 @@ export async function openApplyContext({
           scope: backend.scope,
           fence,
           assertHeld: () => lock.assertHeld(),
+          planHash: plan.planHash,
         })
       : await openJournal(journalFile!, { writerLock: localLocks!.journalLock });
     const readState: ApplyContext['readState'] = backend
@@ -370,6 +408,7 @@ export async function openApplyContext({
       rebroadcasts: [],
       outcomes: new Map<ResourceId, ResourceOutcome>(),
       timings: { submitMs: 0, receiptMs: 0, verificationMs: 0 },
+      steps: [],
       state: { file: stateFile ?? null, written: false },
       prepared: new Map<ResourceId, PreparedAction>(),
       stateSnapshot: null,

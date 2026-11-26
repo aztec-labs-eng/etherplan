@@ -141,6 +141,7 @@ test('saved schedules validate identity before funding and keep blocked plans in
     await copyFile(path.join(source, 'Minimal.json'), artifactFile);
     const planned = runCli(
       'plan',
+      '--json',
       '--fixture',
       specFile,
       '--out',
@@ -162,6 +163,7 @@ test('saved schedules validate identity before funding and keep blocked plans in
 
     const pipelineArgs = [
       'plan',
+      '--json',
       '--fixture',
       specFile,
       '--out',
@@ -223,6 +225,7 @@ test('saved schedules validate identity before funding and keep blocked plans in
     await copyFile(path.join(source, 'minimal-absent-external.json'), specFile);
     const blockedPlan = runCli(
       'plan',
+      '--json',
       '--fixture',
       specFile,
       '--out',

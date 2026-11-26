@@ -93,15 +93,34 @@ export async function assertPinnedAbsent(
   }
 }
 
-/** Require a durable intent, signature, and receipt for the exact planned deployment. */
+/**
+ * Require a durable intent, signature, and receipt for the exact planned deployment. A deployment that `state mv`
+ * moved into this scope has them in its `moved` records.
+ */
 export function pinnedJournalCommitment(
   records: readonly RecoveryRecord[] | undefined,
   resource: PreparedContract,
+  ...deployment: DeploymentFacts
+): { planHash: Hash; commitment: Hash } | null {
+  for (const journal of [{ records, resource }, ...movedJournals(records, resource)]) {
+    const commitment = journalCommitment(journal.records, journal.resource, ...deployment);
+    if (commitment) return commitment;
+  }
+  return null;
+}
+
+type DeploymentFacts = [
   transactionHash: Hash,
   originPlanHash: Hash | undefined,
   transactionFrom: string,
   canonicalReceipt: { blockHash: Hash; blockNumber: bigint | string },
   chain: ChainIdentity,
+];
+
+function journalCommitment(
+  records: readonly RecoveryRecord[] | undefined,
+  resource: PreparedContract,
+  ...[transactionHash, originPlanHash, transactionFrom, canonicalReceipt, chain]: DeploymentFacts
 ): { planHash: Hash; commitment: Hash } | null {
   if (
     !records ||
@@ -167,6 +186,30 @@ export function pinnedJournalCommitment(
   const commitment = pinnedCommitment(signed.planHash, resource);
   if (!same(intent.pinnedCommitment, commitment)) return null;
   return { planHash: signed.planHash, commitment };
+}
+
+/**
+ * The journal records that `state mv` carried for a resource, for each scope and resource ID that they came from, with
+ * the resource as those records name it. The commitment of a pinned-runtime deployment includes the resource ID that
+ * the deployment had, so the journal check of a moved deployment uses that ID.
+ */
+function movedJournals(
+  records: readonly RecoveryRecord[] | undefined,
+  resource: PreparedContract,
+): { records: RecoveryRecord[]; resource: PreparedContract }[] {
+  const origins = new Map<string, { records: RecoveryRecord[]; resource: PreparedContract }>();
+  for (const record of records ?? []) {
+    if (record.phase !== 'moved' || record.actionId !== resource.id) continue;
+    const { scope, actionId } = record.movedFrom;
+    const key = `${scope}\u0000${actionId}`;
+    const origin = origins.get(key) ?? {
+      records: [],
+      resource: { ...resource, id: actionId as PreparedContract['id'] },
+    };
+    origin.records.push(record.record);
+    origins.set(key, origin);
+  }
+  return [...origins.values()];
 }
 
 export function samePinnedCommitments(saved: CreationProof, resource: PreparedContract): boolean {

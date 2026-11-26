@@ -1,5 +1,5 @@
 import { hashJson } from '../identity.ts';
-import { createSchedule } from '../scheduling/index.ts';
+import { createSchedule, normalizeNamedSigners } from '../scheduling/index.ts';
 import { preflight } from './preflight.ts';
 import { ApplyError } from './errors.ts';
 import { isRpcError, safeRpcMessage } from './rpc-error.ts';
@@ -22,7 +22,7 @@ import {
 } from './pipeline.ts';
 import { prepareBatch, signBatch, settleBatch } from './batch.ts';
 import { checkBatchFunding } from './funding.ts';
-import { report, summary } from './report.ts';
+import { report, summary, timed } from './report.ts';
 import { openApplyContext } from './context.ts';
 import type { Address } from '../types.ts';
 import type { ScheduleEntry } from '../scheduling/types.ts';
@@ -40,26 +40,25 @@ import type {
 async function runBatch(ctx: ApplyContext, wave: number, batch: ScheduleEntry[]): Promise<void> {
   if (!ctx.pipeline && new Set(batch.map((entry) => entry.signer)).size !== batch.length)
     throw new ApplyError('schedule', `Wave ${wave} has a batch with two actions for one signer.`);
-  const work = await prepareBatch(ctx, batch);
+  const work = await prepareBatch(ctx, batch, wave);
   if (work.length === 0) return;
-  await checkBatchFunding(ctx, work);
+  await timed(ctx, 'funding', () => checkBatchFunding(ctx, work), wave);
   if (ctx.pipeline) {
     // prepareBatch leaves out an action that the chain already satisfies. signPipelineBatch
     // reserves consecutive nonces for the actions that remain, in their saved order.
     const signingStart = Date.now();
     const signed = await signPipelineBatch(ctx, { wave, work: work as PipelineFundedJob[] });
     ctx.timings.submitMs += Date.now() - signingStart;
-    await settlePipelineBatch(ctx, signed);
+    await timed(ctx, 'settle', () => settlePipelineBatch(ctx, signed), wave);
   } else {
     // Serial batches take a fresh nonce and reject any unknown pending nonce.
-    const signed = await signBatch(ctx, { wave, work });
-    await settleBatch(ctx, signed);
+    const signed = await timed(ctx, 'sign', () => signBatch(ctx, { wave, work }), wave);
+    await timed(ctx, 'settle', () => settleBatch(ctx, signed), wave);
   }
 }
 
 async function persist(ctx: ApplyContext): Promise<StateWriteResult> {
-  await revalidateVerified(ctx);
-  const snapshot = await revalidateDesiredState(ctx);
+  const snapshot = await timed(ctx, 'final-verification', () => revalidateDesiredState(ctx));
   if (!ctx.deps.recordResource)
     return {
       file: ctx.stateFile,
@@ -110,9 +109,18 @@ async function persist(ctx: ApplyContext): Promise<StateWriteResult> {
   }
   if (!state)
     throw new ApplyError('stale-state', 'Verified resources did not produce a state file.');
-  await assertCanonicalSnapshot(ctx, snapshot);
-  await ctx.lock.assertHeld?.();
-  await ctx.writeState(current.version, { ...state, lastPlanHash: ctx.plan.planHash });
+  const recorded = state;
+  await timed(ctx, 'state-commit', async () => {
+    await assertCanonicalSnapshot(ctx, snapshot);
+    await ctx.lock.assertHeld?.();
+    await ctx.writeState(current.version, {
+      ...recorded,
+      ...(ctx.deps.parseSpec(ctx.spec).modules || recorded.moduleRoot
+        ? { moduleRoot: true as const, journalSequence: ctx.journal.records.length }
+        : {}),
+      lastPlanHash: ctx.plan.planHash,
+    });
+  });
   return { file: ctx.stateFile, written: true, resources: verified.length };
 }
 
@@ -130,7 +138,7 @@ function assertFreshState(ctx: ApplyContext, state: StateFile | null): void {
 }
 
 async function run(ctx: ApplyContext): Promise<ApplyResult> {
-  ctx.prepared = await preflight(ctx);
+  ctx.prepared = await timed(ctx, 'preflight', () => preflight(ctx));
   ctx.stateSnapshot = (await ctx.readState()).value;
   if (
     ctx.stateSnapshot &&
@@ -156,6 +164,11 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
     );
   const deployers = ctx.lanes.pool.map((account) => account.address.toLowerCase() as Address);
   const pinned = ctx.plan.pipeline ?? ctx.plan.signers;
+  const named = normalizeNamedSigners(
+    Object.fromEntries(
+      Object.entries(ctx.lanes.named).map(([role, account]) => [role, account.address]),
+    ),
+  );
   const owner =
     ctx.pipeline || ownerActions.length || pinned?.owner
       ? ((ctx.lanes.owner?.address.toLowerCase() as Address) ?? null)
@@ -182,6 +195,7 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
     pinned &&
     (hashJson(deployers) !== hashJson(pinned.deployers) ||
       owner !== pinned.owner ||
+      hashJson(named) !== hashJson(pinned.named ?? {}) ||
       ctx.parallel !== pinned.parallel)
   ) {
     throw new ApplyError(
@@ -191,6 +205,7 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
   }
   ctx.schedule = createSchedule(ctx.plan, deployers, {
     owner,
+    named,
     parallel: ctx.parallel,
     pipeline: ctx.pipeline,
   });
@@ -210,13 +225,17 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
       { evidence: ctx.schedule.deferred },
     );
   await commitments(ctx);
-  await revalidateVerified(ctx);
+  await timed(ctx, 'receipt-sweep', () => revalidateVerified(ctx));
   assertRecoveryEvidence(ctx);
-  await settleJournal(ctx);
-  await recheckReused(ctx);
+  await timed(ctx, 'settle-journal', () => settleJournal(ctx));
+  await timed(ctx, 'recheck-reused', () => recheckReused(ctx));
   // Preserve the dependency check for a later signed wave before revisiting
   // completed earlier waves. This also stops a resend if its prerequisite drifted.
-  if (ctx.pipeline) {
+  const recoveringReorg = [...ctx.prepared.keys()].some((id) => {
+    const latest = ctx.journal.forAction(ctx.plan.planHash, id).at(-1);
+    return latest?.phase === 'broadcast-attempt' && latest.reorgRecovery;
+  });
+  if (ctx.pipeline && !recoveringReorg) {
     for (const wave of ctx.schedule.waves) {
       if (!pipelineAttempt(ctx, wave)) continue;
       const work = wave.batches.flat().map((entry) => {
@@ -233,17 +252,26 @@ async function run(ctx: ApplyContext): Promise<ApplyResult> {
     }
   }
   for (const wave of ctx.schedule.waves) {
-    await revalidateVerified(ctx);
-    if (ctx.pipeline && (await resumePipelineWave(ctx, wave))) {
+    const sweep = () => timed(ctx, 'receipt-sweep', () => revalidateVerified(ctx), wave.wave);
+    const verifications = wave.verifications;
+    if (verifications?.length) {
+      await sweep();
+      await timed(ctx, 'wave-verifications', () => recheckReused(ctx, verifications), wave.wave);
+    }
+    if (ctx.pipeline && pipelineAttempt(ctx, wave)) {
+      await sweep();
+      await timed(ctx, 'resume-wave', () => resumePipelineWave(ctx, wave), wave.wave);
       continue;
     }
     for (const batch of wave.batches) {
-      await revalidateVerified(ctx);
+      if (batch.length === 0) continue;
+      await sweep();
       await runBatch(ctx, wave.wave, batch);
     }
   }
   // Later planned writes can invalidate an earlier getter, so record state only
   // after every action has settled and all desired conditions pass together.
+  await timed(ctx, 'final-receipts', () => revalidateVerified(ctx, true, ctx.config.confirmations));
   ctx.state = await persist(ctx);
   return summary(ctx, 'applied');
 }

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import { bytesToHex, hexToBytes } from 'viem';
-import { hashJson } from '../identity.ts';
+import { canonicalJson, hashJson } from '../identity.ts';
 import { field } from '../json.ts';
 import { liveTransactions } from './journal.ts';
 import { jsonSafe } from './preflight.ts';
@@ -112,54 +112,88 @@ export function encryptionContext(record: {
   };
 }
 
-function recordHash(record: object): Hash {
+export function recordHash(record: object): Hash {
   const { recordHash: _current, ...fields } = record as { recordHash?: unknown };
   return hashJson(fields);
+}
+
+/** A moved record holds one unchanged record of the action and the plan that it names, on the chain of the scope. */
+function validateMoved(
+  { movedFrom, planHash, record }: StoredJournalRecord & { phase: 'moved' },
+  scope: DeploymentScope,
+  sequence: number,
+): void {
+  if (
+    typeof movedFrom?.scope !== 'string' ||
+    !movedFrom.scope ||
+    typeof record?.recordHash !== 'string' ||
+    (record as { phase: unknown }).phase === 'moved' ||
+    record.actionId !== movedFrom.actionId ||
+    record.planHash !== planHash ||
+    record.recordHash !== recordHash(record) ||
+    record.chain?.id !== scope.chainId ||
+    record.chain.genesisHash?.toLowerCase() !== scope.genesisHash
+  )
+    throw new Error(
+      `Moved journal record ${sequence} does not hold an unchanged record of its action.`,
+    );
+}
+
+/** The rules for one record at the position that its predecessor gives it. */
+function validateJournalRecord(
+  record: StoredJournalRecord,
+  scope: DeploymentScope,
+  sequence: number,
+  previousHash: Hash | null,
+): void {
+  if (
+    record.formatVersion !== 2 ||
+    record.sequence !== sequence ||
+    record.previousHash !== previousHash ||
+    record.recordHash !== recordHash(record)
+  )
+    throw new Error(`Journal integrity failure at sequence ${sequence}.`);
+  if (
+    typeof record.planHash !== 'string' ||
+    !HASH.test(record.planHash) ||
+    typeof record.actionId !== 'string' ||
+    typeof record.phase !== 'string' ||
+    ![
+      'intent',
+      'signed',
+      'broadcast-attempt',
+      'broadcast',
+      'receipt',
+      'verified',
+      'failed',
+      'moved',
+    ].includes(record.phase)
+  )
+    throw new Error(`Journal record ${sequence} has invalid identity or phase.`);
+  if (
+    typeof record.principal !== 'string' ||
+    !record.principal ||
+    typeof record.at !== 'string' ||
+    !Number.isFinite(Date.parse(record.at))
+  )
+    throw new Error(`Journal record ${sequence} lacks audit metadata.`);
+  if (
+    record.chain?.id !== scope.chainId ||
+    record.chain.genesisHash?.toLowerCase() !== scope.genesisHash
+  )
+    throw new Error(`Journal chain differs from deployment scope at sequence ${sequence}.`);
+  if (Object.hasOwn(record, 'rawTransaction'))
+    throw new Error('Journal contains plaintext signed transaction bytes.');
+  if (record.phase === 'signed' && !record.encryptedRawTransaction)
+    throw new Error(`Signed journal record ${sequence} has no ciphertext.`);
+  if (record.phase === 'moved') validateMoved(record, scope, sequence);
+  validateJournalCreationProof(record, `Journal record ${sequence}`);
 }
 
 export function validateJournal(records: StoredJournalRecord[], scope: DeploymentScope): void {
   let previousHash: Hash | null = null;
   for (const [index, record] of records.entries()) {
-    if (
-      record.formatVersion !== 2 ||
-      record.sequence !== index + 1 ||
-      record.previousHash !== previousHash ||
-      record.recordHash !== recordHash(record)
-    )
-      throw new Error(`Journal integrity failure at sequence ${index + 1}.`);
-    if (
-      typeof record.planHash !== 'string' ||
-      !HASH.test(record.planHash) ||
-      typeof record.actionId !== 'string' ||
-      typeof record.phase !== 'string' ||
-      ![
-        'intent',
-        'signed',
-        'broadcast-attempt',
-        'broadcast',
-        'receipt',
-        'verified',
-        'failed',
-      ].includes(record.phase)
-    )
-      throw new Error(`Journal record ${index + 1} has invalid identity or phase.`);
-    if (
-      typeof record.principal !== 'string' ||
-      !record.principal ||
-      typeof record.at !== 'string' ||
-      !Number.isFinite(Date.parse(record.at))
-    )
-      throw new Error(`Journal record ${index + 1} lacks audit metadata.`);
-    if (
-      record.chain?.id !== scope.chainId ||
-      record.chain.genesisHash?.toLowerCase() !== scope.genesisHash
-    )
-      throw new Error(`Journal chain differs from deployment scope at sequence ${index + 1}.`);
-    if (Object.hasOwn(record, 'rawTransaction'))
-      throw new Error('Journal contains plaintext signed transaction bytes.');
-    if (record.phase === 'signed' && !record.encryptedRawTransaction)
-      throw new Error(`Signed journal record ${index + 1} has no ciphertext.`);
-    validateJournalCreationProof(record, `Journal record ${index + 1}`);
+    validateJournalRecord(record, scope, index + 1, previousHash);
     previousHash = record.recordHash;
   }
 }
@@ -222,12 +256,25 @@ export async function openStoredJournal({
   scope,
   fence,
   assertHeld,
+  planHash,
 }: OpenStoredJournalInput): Promise<Journal> {
   const persisted = await readStoredJournal(journalStore, scope);
+  // Apply reads signed bytes only to resend an unresolved transaction or to count the spend of the plan it applies.
+  // Other signatures are settled and public on chain; their ciphertext stays as stored evidence, and after
+  // `state push` it is sealed by the source backend's key.
+  const unresolved = new Set(
+    liveTransactions(persisted as unknown as JournalRecord[]).map(({ signed }) =>
+      signed.transactionHash.toLowerCase(),
+    ),
+  );
+  const needsBytes = (item: StoredJournalRecord & { phase: 'signed' }) =>
+    planHash === undefined ||
+    item.planHash === planHash ||
+    unresolved.has(item.transactionHash.toLowerCase());
   const records: JournalRecord[] = [];
   for (const item of persisted) {
-    if (item.phase !== 'signed') {
-      records.push(item);
+    if (item.phase !== 'signed' || !needsBytes(item)) {
+      records.push(item as unknown as JournalRecord);
       continue;
     }
     const bytes = await journalCipher.decrypt(
@@ -237,6 +284,70 @@ export async function openStoredJournal({
     records.push({ ...item, rawTransaction: bytesToHex(bytes) });
   }
   let queue: Promise<unknown> = Promise.resolve();
+  // The ciphertexts that `prepare` made, by encryption context and plaintext. One append takes each of them.
+  const prepared = new Map<string, Promise<unknown>>();
+  const preparedKey = (context: EncryptionContext, raw: Hex) => `${canonicalJson(context)}:${raw}`;
+  /** Runs one write at a time, after the leases are checked at the time that it runs. */
+  function enqueue<T>(write: () => Promise<T>): Promise<T> {
+    const task = queue.then(async () => {
+      await assertHeld();
+      return write();
+    });
+    queue = task.catch(() => {});
+    return task;
+  }
+  /** Builds and validates the record that follows `previousHash` at `sequence`. It stores nothing. */
+  async function seal(
+    fields: Parameters<Journal['append']>[0],
+    sequence: number,
+    previousHash: Hash | null,
+  ): Promise<{ stored: StoredJournalRecord; decoded: JournalRecord }> {
+    // The plaintext bytes leave the record before it is hashed and stored; only signed records may carry them.
+    const { rawTransaction: raw, ...safe } = jsonSafe(fields) as JsonSafeInput;
+    const envelope = {
+      formatVersion: 2 as const,
+      ...safe,
+      sequence,
+      previousHash,
+      at: new Date().toISOString(),
+    };
+    if (
+      envelope.chain?.id !== scope.chainId ||
+      envelope.chain.genesisHash?.toLowerCase() !== scope.genesisHash
+    )
+      throw new Error('Journal append chain differs from deployment scope.');
+    let draft: DistributiveOmit<StoredJournalRecord, 'recordHash'>;
+    if (envelope.phase === 'signed') {
+      if (typeof raw !== 'string')
+        throw new Error('Signed journal record needs raw transaction bytes.');
+      const context = encryptionContext(envelope);
+      const ready = prepared.get(preparedKey(context, raw));
+      prepared.delete(preparedKey(context, raw));
+      const encryptedRawTransaction =
+        (await ready) ?? (await journalCipher.encrypt(hexToBytes(raw), context));
+      draft = { ...envelope, encryptedRawTransaction } as StoredJournalRecord;
+    } else {
+      if (raw !== undefined)
+        throw new Error('Only signed journal records may contain raw transaction bytes.');
+      draft = envelope as StoredJournalRecord;
+    }
+    // This is the runtime check of the shape the casts above claim. The open validated every
+    // stored record, so an append validates only the record that it adds.
+    const stored = { ...draft, recordHash: recordHash(draft) } as StoredJournalRecord;
+    validateJournalRecord(stored, scope, sequence, previousHash);
+    const decoded = (
+      raw === undefined ? stored : { ...stored, rawTransaction: raw }
+    ) as JournalRecord;
+    return { stored, decoded };
+  }
+  /** Advances the journal past records that the store holds. */
+  function commit(entries: { stored: StoredJournalRecord; decoded: JournalRecord }[]): void {
+    for (const { stored, decoded } of entries) {
+      persisted.push(stored);
+      records.push(decoded);
+    }
+  }
+  const appendBatch = journalStore.appendBatch?.bind(journalStore);
   return {
     file: null,
     tornTail: null,
@@ -247,53 +358,63 @@ export async function openStoredJournal({
       );
     },
     append(fields) {
-      const task = queue.then(async () => {
-        await assertHeld();
-        // The plaintext bytes leave the record before it is hashed and stored; only signed records may carry them.
-        const { rawTransaction: raw, ...safe } = jsonSafe(fields) as JsonSafeInput;
-        const envelope = {
-          formatVersion: 2 as const,
-          ...safe,
-          sequence: persisted.length + 1,
-          previousHash: persisted.at(-1)?.recordHash ?? null,
-          at: new Date().toISOString(),
-        };
-        if (
-          envelope.chain?.id !== scope.chainId ||
-          envelope.chain.genesisHash?.toLowerCase() !== scope.genesisHash
-        )
-          throw new Error('Journal append chain differs from deployment scope.');
-        let draft: DistributiveOmit<StoredJournalRecord, 'recordHash'>;
-        if (envelope.phase === 'signed') {
-          if (typeof raw !== 'string')
-            throw new Error('Signed journal record needs raw transaction bytes.');
-          const encryptedRawTransaction = await journalCipher.encrypt(
-            hexToBytes(raw),
-            encryptionContext(envelope),
-          );
-          draft = { ...envelope, encryptedRawTransaction } as StoredJournalRecord;
-        } else {
-          if (raw !== undefined)
-            throw new Error('Only signed journal records may contain raw transaction bytes.');
-          draft = envelope as StoredJournalRecord;
-        }
-        // validateJournal is the runtime check of the shape the casts above claim.
-        const next = { ...draft, recordHash: recordHash(draft) } as StoredJournalRecord;
-        validateJournal([...persisted, next], scope);
-        await journalStore.append(scope, next, {
-          expectedSequence: next.sequence,
-          expectedPreviousHash: next.previousHash,
+      return enqueue(async () => {
+        const entry = await seal(
+          fields,
+          persisted.length + 1,
+          persisted.at(-1)?.recordHash ?? null,
+        );
+        await journalStore.append(scope, entry.stored, {
+          expectedSequence: entry.stored.sequence,
+          expectedPreviousHash: entry.stored.previousHash,
           fence,
         });
-        persisted.push(next);
-        const decoded = (
-          raw === undefined ? next : { ...next, rawTransaction: raw }
-        ) as JournalRecord;
-        records.push(decoded);
-        return decoded;
+        commit([entry]);
+        return entry.decoded;
       });
-      queue = task.catch(() => {});
-      return task;
+    },
+    ...(appendBatch && {
+      appendAll(run) {
+        return enqueue(async () => {
+          if (run.some((fields) => fields.phase === 'signed'))
+            throw new Error('A batch append takes no signed record.');
+          const sealed: Awaited<ReturnType<typeof seal>>[] = [];
+          for (const fields of run)
+            sealed.push(
+              await seal(
+                fields,
+                persisted.length + sealed.length + 1,
+                sealed.at(-1)?.stored.recordHash ?? persisted.at(-1)?.recordHash ?? null,
+              ),
+            );
+          // Each write is atomic, so the journal advances one stored chunk at a time.
+          for (let done = 0; done < sealed.length;) {
+            const rest = sealed.slice(done);
+            const count = await appendBatch(
+              scope,
+              rest.map((entry) => entry.stored),
+              {
+                expectedSequence: rest[0]!.stored.sequence,
+                expectedPreviousHash: rest[0]!.stored.previousHash,
+                fence,
+              },
+            );
+            if (!Number.isSafeInteger(count) || count < 1 || count > rest.length)
+              throw new Error('Journal store reported an invalid batch size.');
+            commit(rest.slice(0, count));
+            done += count;
+          }
+          return sealed.map((entry) => entry.decoded);
+        });
+      },
+    }),
+    prepare(fields) {
+      const { rawTransaction: raw, ...safe } = jsonSafe(fields) as JsonSafeInput;
+      if (safe.phase !== 'signed' || typeof raw !== 'string') return Promise.resolve();
+      const context = encryptionContext(safe);
+      const ready = journalCipher.encrypt(hexToBytes(raw), context).catch(() => undefined);
+      prepared.set(preparedKey(context, raw), ready);
+      return ready.then(() => {});
     },
     async close() {
       await queue;
@@ -305,6 +426,9 @@ export async function openStoredJournal({
 type JsonSafeInput = ReturnType<typeof jsonSafe<Parameters<Journal['append']>[0]>> & {
   rawTransaction?: Hex;
 };
+
+/** The principal of a writer that names none: the operating-system user and host. */
+export const defaultPrincipal = (): string => `${os.userInfo().username}@${os.hostname()}`;
 
 export async function acquireLeases({
   lockProvider,
@@ -322,7 +446,7 @@ export async function acquireLeases({
     throw new Error('Applying principal must be a nonempty string.');
   const holder: LeaseHolder = {
     id: randomUUID(),
-    principal: principal ?? `${os.userInfo().username}@${os.hostname()}`,
+    principal: principal ?? defaultPrincipal(),
     host: os.hostname(),
     pid: process.pid,
     planHash,

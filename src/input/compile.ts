@@ -10,9 +10,11 @@ import {
   checkReferences,
   describeValue,
   literal,
+  readFields,
 } from './evaluate.ts';
 import { assertNotSecret, declareVariables, resolveVariables } from './variables.ts';
 import { MIXER, MIXER_HINT, deriveSalt } from '../spec/salt.ts';
+import type { ModuleBinding, ModuleContext } from './module-types.ts';
 import type { JsonObject, JsonValue } from '../types.ts';
 import type { SaltDerivation } from '../spec/types.ts';
 import type { NameScope, Root, Target } from './evaluate.ts';
@@ -28,12 +30,13 @@ import type {
   HclBody,
   HclDocument,
   HclExpression,
+  HclReference,
   Located,
 } from './types.ts';
 
 type ResourceType = 'contract' | 'external' | 'call' | 'check';
 type DecoderKind =
-  'constant' | 'salt' | 'value' | 'target' | 'after' | 'creationMode' | 'createdCode';
+  'constant' | 'salt' | 'value' | 'target' | 'after' | 'creationMode' | 'createdCode' | 'creator';
 type FieldMap = Record<string, readonly [string, DecoderKind]>;
 type Decoder = (node: HclExpression, name: string) => JsonValue | DerivedSalt;
 type DraftResource = Record<string, JsonValue | undefined> & {
@@ -63,6 +66,7 @@ const CONTRACT_FIELDS: FieldMap = {
   after: ['after', 'after'],
   code_hash: ['codeHash', 'constant'],
   creation_proof_mode: ['creationProofMode', 'creationMode'],
+  created_by: ['createdBy', 'creator'],
   created_code: ['createdCode', 'createdCode'],
   signer_role: ['signerRole', 'constant'],
   sender_independent: ['senderIndependent', 'constant'],
@@ -74,6 +78,7 @@ const EXTERNAL_FIELDS: FieldMap = {
   abi: ['abi', 'constant'],
 };
 const CALL_FIELDS: FieldMap = {
+  abi: ['abi', 'constant'],
   target: ['target', 'target'],
   method: ['method', 'constant'],
   args: ['args', 'value'],
@@ -100,6 +105,7 @@ const CONTRACT_ORDER = [
   'checks',
   'after',
   'codeHash',
+  'createdBy',
   'creationProofMode',
   'createdCode',
   'signerRole',
@@ -110,19 +116,30 @@ const EXTERNAL_ORDER = ['address', 'codeHash', 'abi', 'checks'];
 const CALL_ORDER = [
   'id',
   'target',
+  'abi',
   'method',
   'args',
   'check',
   'before',
+  'additionalChecks',
   'after',
   'signerRole',
   'ownerOnly',
   'transfersOwnership',
 ];
 const TOP_ATTRIBUTES = new Set(['chain_id', 'dependency_mode', 'execution_assumptions', 'mixer']);
-const TOP_BLOCKS = new Set(['resource', 'factory', 'variable', 'locals']);
+const TOP_BLOCKS = new Set(['resource', 'factory', 'variable', 'locals', 'module', 'output']);
 const ASSUMPTION_FIELDS = ['consumer', 'location', 'reference', 'reason'];
-const CALL_CHECK_FIELDS = new Set(['getter', 'args', 'before', 'equals']);
+const CALL_CHECK_FIELDS = new Set([
+  'getter',
+  'args',
+  'before',
+  'before_absent',
+  'before_revert',
+  'after_revert',
+  'address',
+  'equals',
+]);
 // Getter names a getter-list check cannot use; enabled is the block's meta-argument there.
 const RESERVED_GETTERS = new Set(['getter', 'args', 'before', 'equals', 'after']);
 
@@ -270,9 +287,12 @@ function checkShape(block: HclBlock, { root, id }: Target): void {
       );
     }
     assert(
-      ['getter', 'before', 'equals'].every((field) => attributes.has(field)),
+      attributes.has('getter') &&
+        ['equals', 'after_revert'].filter((field) => attributes.has(field)).length === 1 &&
+        ['before', 'before_absent', 'before_revert'].filter((field) => attributes.has(field))
+          .length === 1,
       block,
-      `${what} targets a call and needs getter, before, and equals.`,
+      `${what} targets a call and needs getter, before, and equals (or one before_revert/before_absent and one after_revert).`,
     );
     return;
   }
@@ -316,18 +336,30 @@ function foldCheck(
   if (target.root === 'calls') {
     const call = resources.calls.get(target.name);
     assert(call, block, `Missing ${target.id}.`);
-    assert(
-      !call.check,
-      block,
-      `${target.id} has more than one check block: ${call.checkBlock} and ${name}.`,
-    );
-    call.checkBlock = name;
-    call.check = {
+    const check = {
+      ...(attributes.has('address')
+        ? { address: evaluator.value(get('address')!, 'address') }
+        : {}),
       function: evaluator.constant(get('getter')!, 'getter'),
       args: attributes.has('args') ? evaluator.value(get('args')!, 'args') : [],
-      equals: evaluator.value(get('equals')!, 'equals'),
+      ...(attributes.has('after_revert')
+        ? { revert: evaluator.value(get('after_revert')!, 'after_revert') }
+        : { equals: evaluator.value(get('equals')!, 'equals') }),
     };
-    call.before = { equals: evaluator.value(get('before')!, 'before') };
+    const before = attributes.has('before_absent')
+      ? { absent: evaluator.constant(get('before_absent')!, 'before_absent') }
+      : attributes.has('before_revert')
+        ? { revert: evaluator.value(get('before_revert')!, 'before_revert') }
+        : { equals: evaluator.value(get('before')!, 'before') };
+    if (call.check) {
+      call.additionalChecks ??= [];
+      assert(Array.isArray(call.additionalChecks), block, 'Additional checks must be an array.');
+      call.additionalChecks.push({ check, before });
+    } else {
+      call.checkBlock = name;
+      call.check = check;
+      call.before = before;
+    }
     return;
   }
   let getters: [string, HclExpression, Located][];
@@ -403,6 +435,7 @@ function assertAcyclic(locals: Map<string, HclAttribute>, edges: Map<string, Set
 export interface CompiledProject {
   spec: CompiledSpec;
   variables: VariableValue[];
+  outputs?: Record<string, ModuleBinding>;
 }
 
 /**
@@ -412,6 +445,7 @@ export interface CompiledProject {
 export function compileProject(
   document: HclDocument,
   inputs: VariableInputs = {},
+  module?: ModuleContext,
 ): CompiledProject {
   for (const attribute of document.attributes.values()) {
     const hint =
@@ -438,7 +472,11 @@ export function compileProject(
   const declarations = declareVariables(
     document.blocks.filter((block) => block.type === 'variable'),
   );
-  const variables = resolveVariables(declarations, inputs);
+  const variables = resolveVariables(
+    declarations,
+    inputs,
+    module && new Map([...module.bindings].map(([name, binding]) => [name, binding.value])),
+  );
   const locals = collectLocals(document.blocks.filter((block) => block.type === 'locals'));
 
   const blocks: Record<ResourceType, Map<string, HclBlock>> = {
@@ -479,12 +517,25 @@ export function compileProject(
   // Check every reference, including those in disabled resources and branches that are not taken.
   const names = { contracts: blocks.contract, externals: blocks.external, calls: blocks.call };
   const scope: NameScope = {
+    ...(module
+      ? {
+          moduleOutput(name: string, output: string, node: HclReference) {
+            assert(
+              module.hasOutput(name, output, node),
+              node,
+              `Unknown module output module.${name}.${output}.`,
+            );
+          },
+        }
+      : {}),
     variable(name, node, what) {
       assert(
         declarations.has(name),
         node,
         `${what} uses undeclared variable ${name}. Declare it with variable "${name}" {}.`,
       );
+      if (node.parts.length > 2)
+        readFields(variables.get(name)!.value, node.parts.slice(2), node, what);
     },
     locals,
     declared: (root, name) => names[root].has(name),
@@ -498,11 +549,13 @@ export function compileProject(
     what: string,
     local?: string,
     salt?: (node: Located) => void,
+    createdTarget = false,
+    each = false,
   ) =>
     checkReferences(
       node,
       what,
-      scope,
+      each ? { ...scope, each } : scope,
       (root, name) => {
         if (root === 'var') usedVariables.add(name);
         else {
@@ -512,6 +565,7 @@ export function compileProject(
         }
       },
       salt,
+      createdTarget,
     );
   for (const attribute of document.attributes.values()) {
     const { value } = attribute;
@@ -522,7 +576,8 @@ export function compileProject(
       }
     } else check(value, attribute.name);
   }
-  for (const [name, attribute] of locals) check(attribute.value, `local.${name}`, name);
+  for (const [name, attribute] of locals)
+    check(attribute.value, `local.${name}`, name, undefined, true);
   for (const block of [
     ...document.blocks.filter((item) => item.type === 'resource'),
     ...factories,
@@ -534,9 +589,27 @@ export function compileProject(
         attribute.name,
         undefined,
         contract && attribute.name === 'salt' ? (node) => derives.push(node) : undefined,
+        block.type === 'resource' && block.labels[0] === 'call' && attribute.name === 'target',
       );
     }
   }
+  for (const input of module?.inputs ?? [])
+    check(input.value, 'module input', undefined, undefined, false, input.each);
+  const outputBlocks = document.blocks.filter((block) => block.type === 'output');
+  for (const block of outputBlocks) {
+    assert(block.labels.length === 1, block, 'An output needs one name label.');
+    for (const attribute of attributesOf(block.body, describe(block))) {
+      assert(
+        ['value', 'after'].includes(attribute.name),
+        attribute,
+        `Unknown output attribute ${attribute.name}.`,
+      );
+      check(attribute.value, `output ${block.labels[0]}`);
+    }
+    assert(block.body.attributes.has('value'), block, 'An output needs value.');
+  }
+  if (document.blocks.some((block) => block.type === 'module'))
+    assert(module, document, 'Local modules need compileProjectFile or loadProject.');
   assertAcyclic(locals, localEdges);
 
   const disabled = new Map<string, HclAttribute>();
@@ -549,9 +622,13 @@ export function compileProject(
     );
   };
   const evaluator = new Evaluator({
+    created: (root, name) =>
+      root === 'contracts' &&
+      (blocks.contract.get(name)?.body.attributes.has('created_by') ?? false),
     variables: new Map([...variables].map(([name, item]) => [name, item.value])),
     locals,
     live,
+    ...(module ? { module } : {}),
   });
   const enabled = (block: HclBlock): boolean => {
     const attribute = block.body.attributes.get('enabled');
@@ -599,6 +676,10 @@ export function compileProject(
       // A disabled resource is removed before references resolve. Its attributes must still be known ones.
       fieldAttributes(block, fields[type], true);
       disabled.set(`${ROOTS[type]}.${name}`, block.body.attributes.get('enabled')!);
+      disabled.set(
+        `${ROOTS[type]}.${evaluator.qualified(name)}`,
+        block.body.attributes.get('enabled')!,
+      );
     }
   }
   const sorted = (type: ResourceType) =>
@@ -609,6 +690,7 @@ export function compileProject(
       )
       .sort(([left], [right]) => byName(left, right));
 
+  module?.load(evaluator, chainId);
   const decoders: Record<DecoderKind, Decoder> = {
     constant: (node, name) => evaluator.constant(node, name),
     salt: (node, name) => evaluator.salt(node, name),
@@ -648,32 +730,31 @@ export function compileProject(
         };
       });
     },
-    target: (node, name) => evaluator.resource(node, name, ['contracts']).name,
+    creator: (node, name) => evaluator.resource(node, name, ['calls']).id,
+    target: (node, name) => evaluator.callTarget(node, name),
     after: (node, name) =>
       evaluator
         .resources(node, name, ['contracts', 'externals', 'calls'])
         .map((target) => target.id),
   };
-  const compiled: Resources = {
-    contracts: new Map(
-      sorted('contract').map(([name, block]): [string, DraftResource] => [
-        name,
-        { id: name, ...compileBlock(block, CONTRACT_FIELDS, decoders) },
-      ]),
-    ),
-    externals: new Map(
-      sorted('external').map(([name, block]): [string, DraftResource] => [
-        name,
-        compileBlock(block, EXTERNAL_FIELDS, decoders),
-      ]),
-    ),
-    calls: new Map(
-      sorted('call').map(([name, block]): [string, DraftResource] => [
-        name,
-        { id: name, ...compileBlock(block, CALL_FIELDS, decoders) },
-      ]),
-    ),
+  const compiled: Resources = { contracts: new Map(), externals: new Map(), calls: new Map() };
+  const addReadiness = (item: DraftResource, after: string[]) => {
+    if (after.length)
+      item.after = [...new Set([...((item.after as string[]) ?? []), ...after])].sort();
   };
+  for (const type of ['contract', 'external', 'call'] as const) {
+    for (const [name, block] of sorted(type)) {
+      const id = evaluator.qualified(name);
+      const { value, after } = evaluator.capture(() => compileBlock(block, fields[type], decoders));
+      assert(
+        type !== 'external' || after.length === 0,
+        block,
+        'External observations cannot require module readiness; use an owned contract or a call.',
+      );
+      addReadiness(value, after);
+      compiled[ROOTS[type]].set(id, { ...(type === 'external' ? {} : { id }), ...value });
+    }
+  }
   const disabledChecks = new Map<string, string>();
   for (const [name, block] of sorted('check')) {
     const target = block.body.attributes.get('target');
@@ -681,7 +762,7 @@ export function compileProject(
     const known = staticTarget(target.value);
     if (known) checkShape(block, known);
     if (!enabled(block)) {
-      if (known?.root === 'calls') disabledChecks.set(known.name, name);
+      if (known?.root === 'calls') disabledChecks.set(evaluator.qualified(known.name), name);
       continue;
     }
     // A check follows its target: it is dropped when the target is disabled.
@@ -692,7 +773,14 @@ export function compileProject(
       false,
     );
     if (disabled.has(`${resolved.root}.${resolved.name}`)) continue;
-    foldCheck(block, resolved, compiled, evaluator);
+    const captured = evaluator.capture(() => foldCheck(block, resolved, compiled, evaluator));
+    const item = compiled[resolved.root].get(resolved.name)!;
+    assert(
+      resolved.root !== 'externals' || captured.after.length === 0,
+      block,
+      'External checks cannot require module readiness.',
+    );
+    addReadiness(item, captured.after);
   }
   for (const [name, call] of compiled.calls) {
     const off = disabledChecks.get(name);
@@ -727,7 +815,7 @@ export function compileProject(
       const fields = new Map(item.entries.map((entry) => [entry.key, entry.value]));
       for (const entry of item.entries)
         assert(
-          ASSUMPTION_FIELDS.includes(entry.key),
+          ASSUMPTION_FIELDS.includes(entry.key) || entry.key === 'enabled',
           entry,
           `Execution assumption has unknown attribute ${entry.key}.`,
         );
@@ -736,36 +824,68 @@ export function compileProject(
         item,
         `An execution assumption needs ${ASSUMPTION_FIELDS.join(', ')}.`,
       );
+      const enabled = fields.get('enabled');
+      if (enabled) {
+        const value = evaluator.constant(enabled, 'assumption enabled');
+        assert(typeof value === 'boolean', enabled, 'Assumption enabled must be a boolean.');
+        if (!value) return [];
+      }
       const reference = fields.get('reference');
       assert(reference, item, 'An execution assumption needs reference.');
       assert(
         reference.kind === 'reference' &&
-          reference.parts.length === 3 &&
-          reference.parts[0] === 'contracts' &&
-          reference.parts[2] === 'address',
+          (reference.parts[0] !== 'contracts' ||
+            (reference.parts.length === 3 && reference.parts[2] === 'address')),
         reference,
-        'reference must be contracts.<name>.address.',
+        'reference must be contracts.<name>.address or an address-valued module binding.',
       );
       // An assumption follows its consumer, as a check follows its target.
       const consumer = evaluator.resource(
         fields.get('consumer')!,
         'consumer',
-        ['contracts'],
+        ['contracts', 'calls'],
         false,
       );
-      if (disabled.has(`contracts.${consumer.name}`)) return [];
-      live('contracts', reference.parts[1]!, reference, 'reference');
+      if (disabled.has(`${consumer.root}.${consumer.name}`)) return [];
+      const resolvedReference = evaluator.input(reference, 'reference');
+      assert(
+        resolvedReference !== null &&
+          typeof resolvedReference === 'object' &&
+          !Array.isArray(resolvedReference) &&
+          typeof resolvedReference.ref === 'string' &&
+          /^contracts\.[a-z][a-zA-Z0-9_]*\.address$/.test(resolvedReference.ref),
+        reference,
+        'reference must be contracts.<name>.address or an address-valued module binding.',
+      );
       return [
         {
           consumer: consumer.id,
           location: evaluator.constant(fields.get('location')!, 'location'),
-          reference: reference.parts.join('.'),
+          reference: resolvedReference.ref,
           reason: evaluator.constant(fields.get('reason')!, 'reason'),
         },
       ];
     });
   }
 
+  const outputs: Record<string, ModuleBinding> = Object.create(null);
+  for (const block of outputBlocks) {
+    const name = block.labels[0]!;
+    assert(!Object.hasOwn(outputs, name), block, `Duplicate output ${name}.`);
+    const captured = evaluator.capture(() => {
+      const value = evaluator.input(block.body.attributes.get('value')!.value, `output ${name}`);
+      const after = block.body.attributes.get('after');
+      if (after)
+        for (const target of evaluator.resources(after.value, 'output after', [
+          'contracts',
+          'externals',
+          'calls',
+        ]))
+          evaluator.readiness.add(target.id);
+      return value;
+    });
+    outputs[name] = captured;
+  }
   // Only variables that value fields still reference become spec values. Those used in conditions, enabled,
   // or constant fields are already folded in, so changing one that no field uses does not change the spec hash.
   const spec: CompiledSpec = {
@@ -800,6 +920,7 @@ export function compileProject(
   );
   return {
     spec,
+    ...(outputBlocks.length ? { outputs } : {}),
     variables: [...variables.values()].sort((left, right) => byName(left.name, right.name)),
   };
 }

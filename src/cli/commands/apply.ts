@@ -1,8 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { createPublicClient, http } from 'viem';
 import { applyPlan } from '../../execution/index.ts';
-import { createPlan } from '../../planning/index.ts';
+import { DEFAULT_VERIFICATION_TIMEOUT_MS } from '../../execution/context.ts';
+import { RETRY_INCONCLUSIVE_READS, createPlan } from '../../planning/index.ts';
 import { readState, validateState } from '../../state/index.ts';
 import type { ReplacementFees } from '../../execution/types.ts';
 import type { StateFile } from '../../state/types.ts';
@@ -11,6 +11,7 @@ import {
   addressesFromModule,
   backendFromFile,
   planningJournal,
+  publicClient,
   signerFromModule,
   signersFromEnvironment,
   specNeedsOwner,
@@ -60,9 +61,7 @@ export async function apply(context: ChainCommandContext): Promise<void> {
     ...(options['verification-timeout-ms'] === undefined
       ? {}
       : { verificationTimeoutMs: Number(options['verification-timeout-ms']) }),
-    ...(verificationRpcUrl
-      ? { verificationClient: createPublicClient({ transport: http(verificationRpcUrl) }) }
-      : {}),
+    ...(verificationRpcUrl ? { verificationClient: publicClient(verificationRpcUrl) } : {}),
   };
   if (!options.plan && options.pipeline)
     throw new Error('A pipeline apply needs an explicit saved plan with --plan.');
@@ -94,6 +93,12 @@ export async function apply(context: ChainCommandContext): Promise<void> {
       : {
           deployers: signerSource.signers.deployer.map((account) => account.address),
           owner: signerSource.signers.owner?.address ?? null,
+          named: Object.fromEntries(
+            Object.entries(signerSource.signers.named ?? {}).map(([role, account]) => [
+              role,
+              account.address,
+            ]),
+          ),
         };
     const journalRecords = await planningJournal(stateFile, options, planningBackend);
     plan = await createPlan({
@@ -104,8 +109,11 @@ export async function apply(context: ChainCommandContext): Promise<void> {
       journalRecords,
       signers: { ...addresses, parallel: options.parallel ?? false },
       maxSpendWei: options['max-spend-wei'],
-    });
-    await approvePlan(plan);
+      [RETRY_INCONCLUSIVE_READS]: {
+        timeoutMs: transactionOptions.verificationTimeoutMs ?? DEFAULT_VERIFICATION_TIMEOUT_MS,
+      },
+    } as Parameters<typeof createPlan>[0]);
+    await approvePlan(plan, path.basename(path.dirname(context.specFile)), context.workspace);
     if (planningBackend?.planStore) {
       await planningBackend.planStore.put(planningBackend.scope, plan);
     } else {
@@ -159,6 +167,10 @@ export async function apply(context: ChainCommandContext): Promise<void> {
 function capBudgets(plan: Plan, cap: string): Record<string, string> {
   const signers = plan.pipeline ?? plan.signers;
   if (!signers) return {};
-  const addresses = signers.owner ? [...signers.deployers, signers.owner] : signers.deployers;
+  const addresses = [
+    ...signers.deployers,
+    ...(signers.owner ? [signers.owner] : []),
+    ...Object.values(signers.named ?? {}),
+  ];
   return Object.fromEntries(addresses.map((address) => [address, cap]));
 }

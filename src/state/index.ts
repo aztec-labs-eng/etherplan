@@ -232,13 +232,28 @@ export function validateState(state: unknown): StateFile {
   assert(isObject(state), 'State must be an object.');
   assertNoSecrets(state);
   assert(
-    Object.keys(state).every(
-      (key) =>
-        key === 'formatVersion' || key === 'chain' || key === 'resources' || key === 'lastPlanHash',
+    Object.keys(state).every((key) =>
+      [
+        'formatVersion',
+        'chain',
+        'resources',
+        'lastPlanHash',
+        'moduleRoot',
+        'journalSequence',
+      ].includes(key),
     ),
     'State has unknown fields.',
   );
+  assert(
+    state.moduleRoot === undefined || state.moduleRoot === true,
+    'State moduleRoot must be true when present.',
+  );
   assert(state.formatVersion === 1, 'State must have formatVersion: 1.');
+  assert(
+    state.journalSequence === undefined ||
+      (Number.isSafeInteger(state.journalSequence) && (state.journalSequence as number) >= 0),
+    'State journalSequence must be a nonnegative integer.',
+  );
   if (state.lastPlanHash !== undefined) assertHash(state.lastPlanHash, 'State lastPlanHash');
   validateChain(state.chain);
   assert(isObject(state.resources), 'State resources must be an object.');
@@ -465,6 +480,8 @@ export function importResource({
   if (sourceHash !== undefined) record.sourceHash = sourceHash;
   setSaltDerivation(record, resource);
   const imported = {
+    ...(state.moduleRoot ? { moduleRoot: state.moduleRoot } : {}),
+    ...(state.journalSequence === undefined ? {} : { journalSequence: state.journalSequence }),
     formatVersion: 1,
     chain: { ...state.chain },
     resources: { ...state.resources, [resource.id]: record },
@@ -481,6 +498,7 @@ function desiredInputs(resource: PreparedResource): JsonValue {
       check: resource.check,
       before: resource.before,
       after: resource.after,
+      ...(resource.additionalChecks ? { additionalChecks: resource.additionalChecks } : {}),
       signerRole: resource.signerRole,
     };
   }
@@ -500,6 +518,53 @@ function mergeTransactions(previous: Hash[] = [], current: Hash[] = []): Hash[] 
     }
   }
   return transactions;
+}
+
+/**
+ * The state without the named resources, as Terraform's `state rm` leaves it: each contract stays on chain and the
+ * journal keeps its records. The result has no lastPlanHash, so no plan made before the removal applies over it.
+ */
+/**
+ * The call records that go with the named contracts: each call in the state on the address of a named contract. That
+ * is a call on the contract, or the call that created it. A call that the project declares stays out, because a root
+ * can still call a contract that it no longer owns.
+ */
+export function callsOfContracts(
+  state: StateFile,
+  ids: string[],
+  declared: ReadonlySet<string>,
+): string[] {
+  const resources: Record<string, StateResource> = state.resources;
+  const addresses = new Set(
+    ids.flatMap((id) =>
+      id.startsWith('contract:') && resources[id] ? [resources[id].address.toLowerCase()] : [],
+    ),
+  );
+  return Object.keys(resources).filter(
+    (id) =>
+      id.startsWith('call:') &&
+      !ids.includes(id) &&
+      !declared.has(id) &&
+      addresses.has(resources[id]!.address.toLowerCase()),
+  );
+}
+
+export function removeResources(stateInput: StateFile, ids: string[]): StateFile {
+  const state = validateState(stateInput);
+  assert(ids.length > 0, 'Name at least one resource to remove.');
+  const repeated = ids.filter((id, index) => ids.indexOf(id) !== index);
+  assert(repeated.length === 0, `Resources named more than once: ${repeated.join(', ')}.`);
+  const missing = ids.filter((id) => !Object.hasOwn(state.resources, id));
+  assert(missing.length === 0, `State has no ${missing.join(', ')}.`);
+  return validateState({
+    ...(state.moduleRoot ? { moduleRoot: state.moduleRoot } : {}),
+    ...(state.journalSequence === undefined ? {} : { journalSequence: state.journalSequence }),
+    formatVersion: 1,
+    chain: { ...state.chain },
+    resources: Object.fromEntries(
+      Object.entries(state.resources).filter(([id]) => !ids.includes(id)),
+    ),
+  });
 }
 
 export function recordResource({
@@ -618,6 +683,8 @@ export function recordResource({
   if (sourceHash !== undefined) record.sourceHash = sourceHash;
   setSaltDerivation(record, resource);
   return validateState({
+    ...(state.moduleRoot ? { moduleRoot: state.moduleRoot } : {}),
+    ...(state.journalSequence === undefined ? {} : { journalSequence: state.journalSequence }),
     formatVersion: 1,
     chain: { ...state.chain },
     resources: { ...state.resources, [resource.id]: record },

@@ -241,6 +241,7 @@ test('import --rebaseline accepts a rebuilt artifact for an imported contract; p
 
   const planned = runCli([
     'plan',
+    '--json',
     '--fixture',
     specFile,
     '--state',
@@ -324,6 +325,7 @@ test('import --rebaseline accepts a rebuilt artifact for an imported contract; p
 
   const replanned = runCli([
     'plan',
+    '--json',
     '--fixture',
     specFile,
     '--state',

@@ -1,4 +1,6 @@
+import { namedSigners } from '../environment.ts';
 import { hashJson } from '../../identity.ts';
+import { moduleResourceLabel } from '../../spec/modules.ts';
 import { createSchedule } from '../../scheduling/index.ts';
 import type { Address } from '../../types.ts';
 import { print } from '../shared.ts';
@@ -8,8 +10,12 @@ import type { ChainCommandContext } from './context.ts';
 export async function schedule(context: ChainCommandContext): Promise<void> {
   const { options, client } = context;
   const { plan } = await planFor('schedule', context);
+  const label = (id: Parameters<typeof moduleResourceLabel>[1]) => {
+    const text = moduleResourceLabel(plan.modules, id);
+    return text === id ? {} : { label: text };
+  };
   const blocked = plan.resources.filter(
-    (resource) => !['reuse', 'deploy', 'call'].includes(resource.action),
+    (resource) => !['reuse', 'verify', 'deploy', 'call'].includes(resource.action),
   );
   if (options.plan && blocked.length) {
     print({
@@ -19,6 +25,7 @@ export async function schedule(context: ChainCommandContext): Promise<void> {
       snapshot: 'plan-observed',
       resources: plan.resources.map(({ id, kind, address, action, observation }) => ({
         id,
+        ...label(id),
         kind,
         address,
         action,
@@ -30,18 +37,23 @@ export async function schedule(context: ChainCommandContext): Promise<void> {
   const pinned = plan.pipeline ?? plan.signers;
   const deployers = options.deployers?.split(',') ?? pinned?.deployers;
   if (!deployers) throw new Error('schedule needs --deployers <address,address>.');
+  const named = options['named-signers']
+    ? namedSigners(options['named-signers'])
+    : (pinned?.named ?? {});
   if (plan.pipeline && options.parallel && !plan.pipeline.parallel)
     throw new Error('The saved pipeline plan pins serial scheduling; omit --parallel.');
   if (
     pinned &&
     (hashJson(deployers.map((address) => address.toLowerCase())) !== hashJson(pinned.deployers) ||
       (options.owner?.toLowerCase() ?? pinned.owner) !== pinned.owner ||
-      (options.parallel ?? pinned.parallel) !== pinned.parallel)
+      (options.parallel ?? pinned.parallel) !== pinned.parallel ||
+      hashJson(named) !== hashJson(pinned.named ?? {}))
   ) {
     throw new Error('The requested signers or parallel setting differ from the saved plan.');
   }
   const schedule = createSchedule(plan, deployers, {
     owner: options.owner ?? pinned?.owner ?? null,
+    named,
     parallel: options.parallel ?? pinned?.parallel ?? false,
     pipeline: options.pipeline ?? Boolean(plan.pipeline),
   });
@@ -61,6 +73,7 @@ export async function schedule(context: ChainCommandContext): Promise<void> {
     batches: wave.batches.map((batch) =>
       batch.map((entry) => ({
         ...entry,
+        ...label(entry.id),
         ...(entry.kind === 'contract'
           ? { deployer: requested.get(entry.signer) ?? entry.signer }
           : {}),

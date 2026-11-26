@@ -258,6 +258,32 @@ registry = "${OTHER}"`,
   assert.doesNotThrow(() => parseSpec(spec));
 });
 
+test('an external call retains its ABI and checked before/after values', () => {
+  const abi = [
+    { type: 'function', name: 'configure', stateMutability: 'nonpayable', inputs: [], outputs: [] },
+    {
+      type: 'function',
+      name: 'configured',
+      stateMutability: 'view',
+      inputs: [],
+      outputs: [{ type: 'bool' }],
+    },
+  ];
+  const spec = parseSpec(
+    compile(
+      base({
+        extra: `resource "external" "e" {\n address = "${OTHER}"\n code_hash = "${HASH}"\n abi = ${JSON.stringify(abi)}\n}`,
+      }).replace('target = contracts.registry', 'target = externals.e'),
+      `owner = "${OWNER}"`,
+    ),
+  );
+  assert.equal(spec.calls[0].target, 'external:e');
+  assert.deepEqual(spec.calls[0].check, { function: 'configured', args: [], equals: true });
+  assert.deepEqual(spec.calls[0].before, { equals: false });
+  assert.deepEqual(spec.externals.e.abi, abi);
+  assert.equal(spec.externals.e.codeHash, HASH);
+});
+
 test('invalid .ethp and .ethpvars inputs fail with specific errors', async () => {
   const owner = `owner = "${OWNER}"`;
   const cases = [
@@ -452,13 +478,10 @@ test('invalid .ethp and .ethpvars inputs fail with specific errors', async () =>
       /after references unknown calls\.missing/,
     ],
     [
-      'call target external',
-      base({ extra: `resource "external" "e" {\n address = "${OTHER}"\n}` }).replace(
-        'target = contracts.registry',
-        'target = externals.e',
-      ),
+      'call target call',
+      base().replace('target = contracts.registry', 'target = calls.configure'),
       owner,
-      /test\.ethp:9:12: target must be contracts\.<name>\./,
+      /test\.ethp:9:12: target must be contracts\.<name> or externals\.<name>\./,
     ],
     [
       'call without check',
@@ -467,15 +490,6 @@ test('invalid .ethp and .ethpvars inputs fail with specific errors', async () =>
         .replace(/getter.*\n.*before.*\n.*equals.*\n/, ''),
       owner,
       /call:configure needs one check block with target = calls\.configure/,
-    ],
-    [
-      'two call checks',
-      base({
-        extra:
-          'resource "check" "again" {\n target = calls.configure\n getter = "x"\n before = 1\n equals = 2\n}',
-      }),
-      owner,
-      /call:configure has more than one check block: again and configured/,
     ],
     [
       'call check fields',

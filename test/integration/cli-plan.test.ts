@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { spawnSync } from '../project-cli.mjs';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -54,8 +57,20 @@ test('plan is read-only, complete, and deterministic at one observation block', 
     '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266',
     'latest',
   ]);
-  const first = runCli('plan', '--fixture', 'test/fixtures/minimal-create2.json', ...planArgs);
-  const second = runCli('plan', '--fixture', 'test/fixtures/minimal-create2.json', ...planArgs);
+  const first = runCli(
+    'plan',
+    '--json',
+    '--fixture',
+    'test/fixtures/minimal-create2.json',
+    ...planArgs,
+  );
+  const second = runCli(
+    'plan',
+    '--json',
+    '--fixture',
+    'test/fixtures/minimal-create2.json',
+    ...planArgs,
+  );
   const blockAfter = await rpc('eth_blockNumber');
   const nonceAfter = await rpc('eth_getTransactionCount', [
     '0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266',
@@ -92,7 +107,7 @@ test('plan is read-only, complete, and deterministic at one observation block', 
 });
 
 test('plan fails closed on the wrong chain', () => {
-  const result = runCli('plan', '--fixture', 'test/fixtures/minimal-wrong-chain.json');
+  const result = runCli('plan', '--json', '--fixture', 'test/fixtures/minimal-wrong-chain.json');
 
   assert.equal(result.status, 1);
   assert.match(result.stderr, /chain 31337.*requires 1/i);
@@ -105,7 +120,7 @@ test('plan fails closed when the canonical CREATE2 proxy has wrong code', async 
   try {
     await rpc('anvil_setCode', [factory, '0x6000']);
     assert.equal(await rpc('eth_getCode', [factory, 'latest']), '0x6000');
-    const result = runCli('plan', '--fixture', 'test/fixtures/minimal-create2.json');
+    const result = runCli('plan', '--json', '--fixture', 'test/fixtures/minimal-create2.json');
     assert.equal(result.status, 1);
     assert.match(result.stderr, /factory|CREATE2|proxy/i);
     assert.equal(result.stdout, '');
@@ -123,4 +138,39 @@ test('plan reports an absent external and blocks its dependent contract', () => 
   assert.match(report, /contract:minimal/);
   assert.match(report, /absent|no code|conflict/i);
   assert.match(report, /blocked|dependency/i);
+  assert.match(report, /CONFLICT|UNVERIFIED/);
+  assert.match(report, /Plan blocked:/);
+});
+
+test('readable plans retain the same saved plan as explicit JSON output', async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'etherplan-readable-plan-'));
+  const file = path.join(directory, 'plan.json');
+  try {
+    const human = runCli(
+      'plan',
+      '--fixture',
+      'test/fixtures/minimal-create2.json',
+      ...planArgs,
+      '--out',
+      file,
+    );
+    assert.equal(human.status, 0, human.stderr);
+    assert.match(human.stdout, /contract:minimal: DEPLOY at 0x/);
+    assert.match(human.stdout, /Plan complete: 1 deployment/);
+    assert.ok(human.stdout.includes(`Full plan saved to ${file}`));
+    assert.doesNotMatch(human.stdout, /"resources"|"data"/);
+    const raw = runCli(
+      'plan',
+      '--json',
+      '--fixture',
+      'test/fixtures/minimal-create2.json',
+      ...planArgs,
+      '--out',
+      '-',
+    );
+    assert.equal(raw.status, 0, raw.stderr);
+    assert.deepEqual(JSON.parse(raw.stdout), JSON.parse(await readFile(file, 'utf8')));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

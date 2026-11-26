@@ -42,6 +42,7 @@ test('CLI plans and applies parallel deployers through a signer module with loca
   try {
     const planned = cli(
       'plan',
+      '--json',
       '--fixture',
       spec,
       '--out',
@@ -110,6 +111,7 @@ test('owner-role deployment with no calls works through a signer module in plan 
       });
     const planned = cli([
       'plan',
+      '--json',
       '--fixture',
       specFile,
       '--out',

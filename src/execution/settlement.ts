@@ -14,6 +14,8 @@ import {
   nonceConsumed,
   receiptAfterNonceUse,
   receiptJson,
+  receiptRetryOptions,
+  retryRead,
   signEnvelope,
   validateSignedTransaction,
   waitForReceipt,
@@ -92,14 +94,17 @@ export async function assertSignerHistory(
     return;
   }
   if (!journalStore || !scope) return;
-  const scopeRecords = new Map<string, StoredJournalRecord[]>();
-  const priorJournal = async (entry: SignedIndexEntry): Promise<StoredJournalRecord[]> => {
+  const history = (ctx.signerHistory ??= { signers: new Map(), journals: new Map() });
+  const priorJournal = async (
+    entry: SignedIndexEntry,
+  ): Promise<(StoredJournalRecord | JournalRecord)[]> => {
     const priorScope = deploymentScope(
       { project: entry.project, environment: entry.environment, label: entry.label },
       { id: scope.chainId, genesisHash: scope.genesisHash },
     );
     const key = scopeKey(priorScope);
-    const cached = scopeRecords.get(key);
+    if (key === scopeKey(scope)) return ctx.journal.records;
+    const cached = history.journals.get(key);
     if (cached) return cached;
     const records: StoredJournalRecord[] = [];
     for await (const record of journalStore.read(priorScope)) records.push(record);
@@ -112,12 +117,58 @@ export async function assertSignerHistory(
       )
         throw new ApplyError('journal', `Signer source journal ${key} differs from its head.`);
     }
-    scopeRecords.set(key, records);
+    history.journals.set(key, records);
     return records;
   };
+  const retry = receiptRetryOptions(ctx.config);
+  const settled = new Map<string, bigint>();
+  let latest: bigint | undefined;
+  /**
+   * The account nonce of a signer at the newest block that has `confirmations` confirmations. The
+   * chain used each lower nonce at that depth, so a signature with a lower nonce cannot be included.
+   */
+  const settledNonce = async (address: string, confirmations: number): Promise<bigint> => {
+    const key = `${address}:${confirmations}`;
+    let nonce = settled.get(key);
+    if (nonce === undefined) {
+      latest ??= (await retryRead(() => ctx.client.getBlock({ blockTag: 'latest' }), retry)).number;
+      const blockNumber = latest - BigInt(confirmations - 1);
+      nonce =
+        blockNumber < 0n
+          ? 0n
+          : BigInt(
+              await retryRead(
+                () => ctx.client.getTransactionCount({ address: address as Address, blockNumber }),
+                retry,
+              ),
+            );
+      settled.set(key, nonce);
+    }
+    return nonce;
+  };
   for (const address of new Set(addresses.map((value) => value.toLowerCase()))) {
+    const cached = history.signers.get(address);
+    const entries = cached?.entries.slice() ?? [];
+    const sequence = ctx.journal.records.length;
+    if (!cached) {
+      for await (const signed of journalStore.signedForSigner(scope, address)) entries.push(signed);
+    } else {
+      for (const record of ctx.journal.records.slice(cached.sequence, sequence)) {
+        if (record.phase !== 'signed' || record.signer.toLowerCase() !== address) continue;
+        entries.push({
+          project: scope.project,
+          environment: scope.environment,
+          label: scope.label,
+          planHash: record.planHash,
+          actionId: record.actionId,
+          signer: record.signer,
+          nonce: record.nonce,
+          transactionHash: record.transactionHash,
+        });
+      }
+    }
     const groups = new Map<string, SignedIndexEntry[]>();
-    for await (const signed of journalStore.signedForSigner(scope, address)) {
+    for (const signed of entries) {
       if (
         typeof signed.project !== 'string' ||
         typeof signed.environment !== 'string' ||
@@ -152,7 +203,9 @@ export async function assertSignerHistory(
       const first = variants[0]!;
       const records = await priorJournal(first);
       const signed = records.filter(
-        (record): record is StoredJournalRecord & Omit<SignedFields, 'rawTransaction'> =>
+        (
+          record,
+        ): record is (StoredJournalRecord | JournalRecord) & Omit<SignedFields, 'rawTransaction'> =>
           record.phase === 'signed' &&
           record.planHash.toLowerCase() === first.planHash.toLowerCase() &&
           record.actionId === first.actionId &&
@@ -185,9 +238,18 @@ export async function assertSignerHistory(
         first.planHash.toLowerCase() === ctx.plan.planHash.toLowerCase() &&
         signed.every((record) => activeSignatures.has(record.transactionHash.toLowerCase()));
       if (activeCurrent) continue;
+      const samePlan =
+        first.project === scope.project &&
+        first.environment === scope.environment &&
+        first.label === scope.label &&
+        first.planHash.toLowerCase() === ctx.plan.planHash.toLowerCase();
+      const confirmations = samePlan ? 1 : ctx.config.confirmations;
+      // The history of a signer grows with each deployment. One nonce read settles all of it that
+      // the chain has passed, and only a signature at a nonce that is still open needs its receipt.
+      if (BigInt(first.nonce) < (await settledNonce(address, confirmations))) continue;
       let mined: { signed: SignedIndexEntry; receipt: Receipt } | null = null;
       for (const signed of variants) {
-        const receipt = await findReceipt(ctx.client, signed.transactionHash);
+        const receipt = await findReceipt(ctx.client, signed.transactionHash, retry);
         if (receipt) {
           mined = { signed, receipt };
           break;
@@ -201,8 +263,17 @@ export async function assertSignerHistory(
           { actionId: signed.actionId, retryable: true },
         );
       }
-      await stableReceipt(ctx, mined.signed.transactionHash, mined.receipt, mined.signed.actionId);
+      await stableReceipt(
+        ctx,
+        mined.signed.transactionHash,
+        mined.receipt,
+        mined.signed.actionId,
+        false,
+        retry,
+        confirmations,
+      );
     }
+    history.signers.set(address, { entries, sequence });
   }
 }
 
@@ -272,10 +343,11 @@ async function assertLocalJournalSettled(
       variants.every((record) => activeSignatures.has(record.transactionHash.toLowerCase()))
     )
       continue;
+    const retry = receiptRetryOptions(ctx.config);
     let receipt: Receipt | null = null;
     let mined: SignedRecord | null = null;
     for (const signed of variants) {
-      receipt = await findReceipt(ctx.client, signed.transactionHash);
+      receipt = await findReceipt(ctx.client, signed.transactionHash, retry);
       if (receipt) {
         mined = signed;
         break;
@@ -287,7 +359,17 @@ async function assertLocalJournalSettled(
         `Local journal ${file} has unresolved transaction ${first.transactionHash} for signer ${address}. Resume that journal first.`,
         { actionId: first.actionId, retryable: true },
       );
-    await stableReceipt(ctx, mined.transactionHash, receipt, mined.actionId);
+    await stableReceipt(
+      ctx,
+      mined.transactionHash,
+      receipt,
+      mined.actionId,
+      false,
+      retry,
+      currentRecords && first.planHash.toLowerCase() === ctx.plan.planHash.toLowerCase()
+        ? 1
+        : ctx.config.confirmations,
+    );
   }
 }
 
@@ -365,9 +447,10 @@ export async function send(
   });
   if (!sent.accepted) {
     if (sent.nonceTooLow) {
-      const receipt = await findKnownReceipt(ctx.client, variants);
+      const retry = receiptRetryOptions(ctx.config);
+      const receipt = await findKnownReceipt(ctx.client, variants, retry);
       if (receipt) return receipt;
-      if (await nonceConsumed(ctx.client, signed.signer, signed.nonce)) {
+      if (await nonceConsumed(ctx.client, signed.signer, signed.nonce, retry)) {
         const late = await receiptAfterNonceUse(ctx.client, variants, ctx.config);
         if (late) return late;
         await fail(
@@ -590,8 +673,9 @@ async function settle(
     ctx.journal.forAction(ctx.plan.planHash, item.planned.id),
     signed,
   );
-  let receipt = await findKnownReceipt(ctx.client, variants);
-  if (!receipt && (await nonceConsumed(ctx.client, signed.signer, signed.nonce))) {
+  const retry = receiptRetryOptions(ctx.config);
+  let receipt = await findKnownReceipt(ctx.client, variants, retry);
+  if (!receipt && (await nonceConsumed(ctx.client, signed.signer, signed.nonce, retry))) {
     receipt = await receiptAfterNonceUse(ctx.client, variants, ctx.config);
     if (!receipt) {
       await fail(
@@ -614,7 +698,7 @@ async function settle(
     // journaled variant has a receipt or an unknown transaction consumes it.
     await checkExecutionDependencies(ctx, [{ item }], false);
     signed = await replaceSigned(ctx, item, signed, variants);
-    receipt = await findKnownReceipt(ctx.client, variants);
+    receipt = await findKnownReceipt(ctx.client, variants, retry);
     if (!receipt) receipt = await send(ctx, item, signed, { rebroadcast: true, variants });
   }
   const mined = matchingVariant(variants, receipt);
@@ -627,9 +711,10 @@ async function settle(
 async function settleForeign(ctx: ApplyContext, signed: SignedRecord): Promise<JournalRecord> {
   const identity = { planHash: signed.planHash, chain: signed.chain };
   const variants = signedVariants(ctx.journal.forAction(signed.planHash, signed.actionId), signed);
-  let receipt = await findKnownReceipt(ctx.client, variants);
+  const retry = receiptRetryOptions(ctx.config);
+  let receipt = await findKnownReceipt(ctx.client, variants, retry);
   if (!receipt) {
-    if (!(await nonceConsumed(ctx.client, signed.signer, signed.nonce))) {
+    if (!(await nonceConsumed(ctx.client, signed.signer, signed.nonce, retry))) {
       throw new ApplyError(
         'foreign-outstanding',
         `Plan ${signed.planHash} has signed transaction ${signed.transactionHash} (signer ${signed.signer}, nonce ${signed.nonce}) that is not on chain. Resume that plan, or wait until the nonce is used, before you apply another plan.`,

@@ -61,6 +61,7 @@ test('the project compiles to its JSON lowering and plans its resources', async 
   const ethp = succeeded(
     runCli([
       'plan',
+      '--json',
       '--out',
       '-',
       '--deployers',
@@ -91,6 +92,7 @@ test('editing .ethpvars after planning stops a saved-plan apply at stale-spec be
   succeeded(
     runCli([
       'plan',
+      '--json',
       '--out',
       planFile,
       '--state',
@@ -139,6 +141,7 @@ test('plan bundles split files and saved-plan apply rejects an edit to a split f
     const plan = succeeded(
       runCli([
         'plan',
+        '--json',
         '--out',
         planFile,
         '--state',
@@ -193,7 +196,7 @@ command "apply" {
 }
 `,
   );
-  const planned = runCli(['plan', '--max-spend-wei', maxSpend]);
+  const planned = runCli(['plan', '--json', '--max-spend-wei', maxSpend]);
   const plan = succeeded(planned);
   assert.match(
     planned.stderr,
@@ -268,13 +271,12 @@ resource "contract" "doubler" {
   const planFile = path.join(project, 'blue-plan.json');
   const write = ['--deployers', owner, '--max-spend-wei', maxSpend];
   const run = (args, signed = false, env = {}) => runCli(args, signed, env, project);
-  const planned = run(['plan', '--workspace', 'blue', '--out', planFile, ...write]);
+  const planned = run(['plan', '--json', '--workspace', 'blue', '--out', planFile, ...write]);
   assert.deepEqual(
     succeeded(planned).resources.map((resource) => [resource.id, resource.action]),
     [['contract:doubler', 'deploy']],
   );
-  assert.match(planned.stderr, /Using workspace blue\./);
-  assert.match(planned.stderr, /main\.blue\.ethpvars/);
+  assert.equal(planned.stderr, 'Using workspace blue.\n');
 
   const nonceBefore = await nonce();
   const drifted = run(
@@ -305,7 +307,9 @@ resource "contract" "doubler" {
     'verified',
   );
 
-  const other = succeeded(run(['plan', '--out', '-', ...write], false, { ETHP_VAR_salt: green }));
+  const other = succeeded(
+    run(['plan', '--json', '--out', '-', ...write], false, { ETHP_VAR_salt: green }),
+  );
   assert.deepEqual(
     other.resources.map((resource) => [resource.id, resource.action]),
     [['contract:doubler', 'deploy']],
@@ -329,6 +333,7 @@ test('salt = derive hashes the project mixer, and compile and plan pin the deriv
     const plan = succeeded(
       runCli([
         'plan',
+        '--json',
         '--workspace',
         'derive',
         '--out',
@@ -363,6 +368,7 @@ test('raising a generation replaces an unchanged contract and the contracts that
   const plan = async () => {
     const result = runCli([
       'plan',
+      '--json',
       '--workspace',
       'generation',
       '--out',

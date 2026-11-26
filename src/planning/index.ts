@@ -12,8 +12,12 @@ import {
 } from '../spec/index.ts';
 import { executionWaves } from '../scheduling/index.ts';
 import { prepareResources, transactionFor } from './resources.ts';
-import { createSchedule } from '../scheduling/index.ts';
-import { verifyResource } from '../verification/index.ts';
+import { createSchedule, normalizeNamedSigners } from '../scheduling/index.ts';
+import {
+  verificationInconclusive,
+  verifyResource,
+  verifyResourceTracked,
+} from '../verification/index.ts';
 import { recoveryProof } from '../recovery.ts';
 import { assertPinnedAbsent } from '../verification/pinned-runtime.ts';
 import type { Block } from 'viem';
@@ -21,6 +25,7 @@ import type { ContractStateResource, StateFile } from '../state/types.ts';
 import type {
   Address,
   ChainIdentity,
+  Client,
   ContractId,
   DistributiveOmit,
   Hash,
@@ -82,6 +87,7 @@ function planResource(
   copyDefined(result, resource, ['resolutionDependencies', 'executionEdges']);
   if (resource.kind === 'contract') {
     copyDefined(result, resource, [
+      'createdBy',
       'artifactHash',
       'initcodeHash',
       'inputsHash',
@@ -108,6 +114,7 @@ function planResource(
       'check',
       'before',
       'after',
+      'additionalChecks',
       'signerRole',
       'ownerOnly',
       'transfersOwnership',
@@ -120,7 +127,7 @@ function planResource(
 }
 
 function bindingState(observation: VerificationResult): BindingObservation | null {
-  return observation.bindingChecks?.[0]?.observed ?? null;
+  return observation.bindingState ?? observation.bindingChecks?.[0]?.observed ?? null;
 }
 
 function decide(
@@ -128,16 +135,20 @@ function decide(
   observation: VerificationResult,
   plannedById: Map<ResourceId, PlannedResource>,
 ): PlanAction {
-  if (resource.kind === 'contract' && observation.codeComparison?.mode === 'absent')
+  if (resource.kind === 'contract' && observation.codeComparison?.mode === 'absent') {
+    if (resource.createdBy && plannedById.get(resource.createdBy)?.action === 'call')
+      return 'verify';
     return resource.initcode === undefined ? 'conflict' : 'deploy';
+  }
   if (resource.kind === 'call') {
     const state = bindingState(observation);
     if (state === 'after') return 'reuse';
     if (state === 'before') return 'call';
     if (
       state === 'read-failed' &&
-      observation.bindingChecks?.[0]?.targetAbsent === true &&
-      plannedById.get(resource.targetId)?.action === 'deploy'
+      observation.bindingChecks.length > 0 &&
+      observation.bindingChecks.every((check) => check.targetAbsent === true) &&
+      ['deploy', 'verify'].includes(plannedById.get(resource.targetId)?.action ?? '')
     )
       return 'call';
     if (state === 'other' || state === 'read-failed') return 'conflict';
@@ -240,9 +251,9 @@ function saltChange(
 }
 
 // Deployment identity is the address, initcode, constructor inputs, and generation; the artifact hash is provenance.
-// Both address and deployment identity changing is a replacement; only one changing is a conflict. An artifact-only
-// change is drift. A raised generation moves the derived salt, so it replaces an unchanged contract on purpose; a
-// lowered one is a conflict, because its earlier address may already hold code.
+// A changed address is a replacement when the deployment identity or the salt changed with it; any other one-sided
+// change is a conflict. An artifact-only change is drift. A raised generation moves the derived salt, so it replaces an
+// unchanged contract on purpose; a lowered one is a conflict, because its earlier address may already hold code.
 function compareState(
   resource: PreparedResource,
   state: StateFile | null,
@@ -259,6 +270,11 @@ function compareState(
     lower(record.inputsHash) === lower(resource.inputsHash) &&
     previousGeneration === generation;
   const artifactMatches = lower(record.artifactHash) === lower(resource.artifactHash);
+  const change = saltChange(resource, record);
+  // An adopted contract has no salt, so its changed address stays a conflict.
+  const resalted = Boolean(change?.previousSalt && change.salt);
+  const replacement =
+    !addressMatches && (!identityMatches || resalted) && generation >= previousGeneration;
   const comparison: StateComparison = {
     previousAddress: record.address,
     previousIdentity: {
@@ -270,8 +286,8 @@ function compareState(
     addressMatches,
     identityMatches,
     artifactMatches,
-    replacement: !addressMatches && !identityMatches && generation >= previousGeneration,
-    conflict: addressMatches !== identityMatches || generation < previousGeneration,
+    replacement,
+    conflict: addressMatches ? !identityMatches : !replacement,
     liveCodeMatchesState:
       record.codeHash === null ||
       record.codeHash === undefined ||
@@ -281,7 +297,6 @@ function compareState(
     comparison.artifactDrift = artifactDrift(resource, record, verification);
     comparison.conflict = !comparison.artifactDrift.accepted;
   }
-  const change = saltChange(resource, record);
   if (change) comparison.saltChange = change;
   return comparison;
 }
@@ -314,6 +329,27 @@ function assertStateChain(state: StateFile | null, chain: ChainIdentity): void {
   );
 }
 
+/** Internal, not exported publicly: apply's automatic planning retries inconclusive reads. */
+export const RETRY_INCONCLUSIVE_READS = Symbol('retry inconclusive planning reads');
+
+// The plan still confirms its observed block at the end, so retries cannot hide a reorg.
+async function verifyRetrying(
+  resource: PreparedResource,
+  client: Client,
+  options: VerifyOptions,
+  deadline: number,
+): Promise<VerificationResult> {
+  let delay = 500;
+  for (;;) {
+    const result = await verifyResourceTracked(resource, client, options);
+    if (!verificationInconclusive(result) || Date.now() >= deadline) return result;
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(delay, Math.max(0, deadline - Date.now()))),
+    );
+    delay = Math.min(delay * 2, 10_000);
+  }
+}
+
 /**
  * Builds a plan from one observed chain block. Resolves values in resolution order,
  * evaluates unsafe dependents in execution order, and confirms the
@@ -329,12 +365,26 @@ export async function createPlan({
   pipeline = null,
   signers = null,
   maxSpendWei = null,
+  ...internal
 }: CreatePlanInput): Promise<Plan> {
+  const retry = (internal as { [RETRY_INCONCLUSIVE_READS]?: { timeoutMs: number } })[
+    RETRY_INCONCLUSIVE_READS
+  ];
   assert(
     client && typeof client.getChainId === 'function' && typeof client.getBlock === 'function',
     'Plan needs a read-only chain client.',
   );
   const spec = parseSpec(specInput);
+  if (spec.modules || state?.moduleRoot) {
+    const owned = new Set(spec.contracts.map((item) => `contract:${item.id}`));
+    const omitted = Object.keys(state?.resources ?? {}).filter(
+      (id) => id.startsWith('contract:') && !owned.has(id),
+    );
+    assert(
+      omitted.length === 0,
+      `Module root omitted owned contracts: ${omitted.join(', ')}. Use the complete root, or remove them from state with etherplan state rm.`,
+    );
+  }
   const described = usesDependencyPlan(spec);
   const ordered = graph(spec);
   const { resources } = prepareResources(spec, ordered, artifacts);
@@ -399,7 +449,9 @@ export async function createPlan({
     options.chain = chain;
     options.journalRecords = journalRecords;
     onResourceCheck?.(resource.id);
-    const verification = await verifyResource(resource, client, options);
+    const verification = retry
+      ? await verifyRetrying(resource, client, options, Date.now() + retry.timeoutMs)
+      : await verifyResource(resource, client, options);
     const stateComparison = compareState(resource, state, verification);
     const observation: PlanObservation = stateComparison
       ? { ...verification, stateComparison }
@@ -440,6 +492,19 @@ export async function createPlan({
         ],
       };
     }
+    if (
+      (spec.modules || state?.moduleRoot) &&
+      action === 'reuse' &&
+      state?.resources[resource.id]
+    ) {
+      const unmet = resource.dependencies.filter((id) =>
+        ['deploy', 'call', 'verify'].includes(plannedById.get(id)?.action ?? ''),
+      );
+      assert(
+        unmet.length === 0,
+        `Completed ${resource.id} cannot acquire unmet readiness prerequisites: ${unmet.join(', ')}. Its prior execution does not prove this ordering.`,
+      );
+    }
     const unsafeDependencies = resource.dependencies.filter((dependency) => {
       const planned = plannedById.get(dependency)?.action;
       return planned === 'conflict' || planned === 'unverified';
@@ -478,6 +543,7 @@ export async function createPlan({
       .map((resource): [ContractId, Hash] => [resource.id, resource.artifactHash]),
   );
   const base = {
+    ...(spec.modules ? { modules: spec.modules } : {}),
     chain,
     observed: { blockNumber: observed.number.toString(), blockHash: observed.hash },
     stateHash: hashJson(state),
@@ -525,7 +591,21 @@ export async function createPlan({
       (resource) => ['deploy', 'call'].includes(resource.action) && resource.signerRole === 'owner',
     );
     assert(!needsOwner || signers.owner, 'Plan with owner actions needs --owner <address>.');
+    const named = normalizeNamedSigners(signers.named);
+    for (const resource of planned) {
+      if (
+        ['deploy', 'call'].includes(resource.action) &&
+        'signerRole' in resource &&
+        resource.signerRole &&
+        !['deployer', 'owner'].includes(resource.signerRole)
+      )
+        assert(
+          Object.hasOwn(named, resource.signerRole),
+          `No named signer for ${resource.signerRole}.`,
+        );
+    }
     fields.signers = {
+      ...(Object.keys(named).length ? { named } : {}),
       deployers,
       owner: needsOwner && signers.owner ? (signers.owner.toLowerCase() as Address) : null,
       parallel: signers.parallel ?? false,
@@ -537,6 +617,7 @@ export async function createPlan({
     );
     const schedule = createSchedule(fields, deployers, {
       owner: pipeline.owner ?? null,
+      named: pipeline.named ?? {},
       parallel: pipeline.parallel ?? false,
       pipeline: true,
     });
@@ -546,7 +627,9 @@ export async function createPlan({
       throw new Error(
         `Cannot pipeline unschedulable actions: ${schedule.deferred.map((entry) => entry.id).join(', ')}.`,
       );
+    const named = normalizeNamedSigners(pipeline.named);
     fields.pipeline = {
+      ...(Object.keys(named).length ? { named } : {}),
       deployers,
       owner: pipeline.owner ? (pipeline.owner.toLowerCase() as Address) : null,
       parallel: pipeline.parallel ?? false,

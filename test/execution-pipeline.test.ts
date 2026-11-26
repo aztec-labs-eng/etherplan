@@ -383,6 +383,83 @@ test('P-06/P-10/P-11/P-12: plan tampering, group funding, budget, and estimation
   }
 });
 
+test('gas estimates that finish out of order stay with their own transactions', async () => {
+  const chain = await startAnvil();
+  try {
+    const input = await inputFor(chain, 4);
+    const ws = await workspace();
+    const estimated = new Map();
+    let calls = 0;
+    const client = new Proxy(chain.client, {
+      get(target, property) {
+        if (property === 'estimateGas')
+          return async (args) => {
+            // Each transaction gets its own limit, and a later request answers sooner.
+            const call = calls++;
+            const gas = (await target.estimateGas(args)) + BigInt(1_000 * (call + 1));
+            await sleep(20 * (4 - call));
+            estimated.set(keccak256(args.data), gas);
+            return gas;
+          };
+        return target[property];
+      },
+    });
+    const result = await apply(chain, input, ws, { client, gasMultiplier: 1 });
+    assert.equal(result.status, 'applied');
+    const intents = (await recordsOf(ws.journalFile)).filter((record) => record.phase === 'intent');
+    assert.deepEqual(
+      intents.map((intent) => intent.actionId),
+      input.plan.resources.map((resource) => resource.id),
+    );
+    for (const intent of intents) assert.equal(intent.gas, String(estimated.get(intent.dataHash)));
+  } finally {
+    await chain.stop();
+  }
+});
+
+test('the earliest failed gas estimate is reported after every started estimate has finished', async () => {
+  const chain = await startAnvil();
+  try {
+    const input = await inputFor(chain, 4);
+    const ws = await workspace();
+    let calls = 0;
+    let active = 0;
+    const client = new Proxy(chain.client, {
+      get(target, property) {
+        if (property === 'estimateGas')
+          return async (args) => {
+            const call = calls++;
+            active++;
+            try {
+              // The second and the third estimate fail. The third fails first, and the first succeeds last.
+              await sleep([60, 40, 5, 5][call]);
+              if (call === 1 || call === 2) throw new Error('injected estimate failure');
+              return await target.estimateGas(args);
+            } finally {
+              active--;
+            }
+          };
+        return target[property];
+      },
+    });
+    let failure;
+    await apply(chain, input, ws, { client }).catch((error) => (failure = error));
+    assert.equal(failure?.code, 'estimate-failed', failure?.message);
+    assert.equal(failure.actionId, input.plan.resources[1].id);
+    assert.equal(active, 0, 'no estimate is in flight when preparation stops');
+    assert.deepEqual(
+      (await recordsOf(ws.journalFile)).map((record) => [record.phase, record.actionId]),
+      [['failed', input.plan.resources[1].id]],
+    );
+    assert.equal(
+      await chain.client.getTransactionCount({ address: deployerA.address, blockTag: 'pending' }),
+      0,
+    );
+  } finally {
+    await chain.stop();
+  }
+});
+
 test('a partial reservation charges its whole group once on recovery', async () => {
   const chain = await startAnvil();
   try {
@@ -955,8 +1032,10 @@ test('P-52: a reverted middle nonce does not prevent later signed actions from s
       get(target, property) {
         if (property === 'estimateGas')
           return async (args) => {
+            // The requests start in plan order, and they can answer in any order.
+            const third = ++estimates === 3;
             const estimate = await target.estimateGas(args);
-            return ++estimates === 3 ? (estimate * 60n) / 100n : estimate;
+            return third ? (estimate * 60n) / 100n : estimate;
           };
         return target[property];
       },

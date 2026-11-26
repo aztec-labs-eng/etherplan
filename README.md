@@ -9,7 +9,7 @@ It deploys through the canonical CREATE2 factory, can adopt existing contracts, 
 Use Node.js 22.18 or newer. Install the current beta in your Solidity project from its GitHub tag:
 
 ```sh
-npm install --save-dev 'github:randyquaye/etherplan#v0.3.2-beta'
+npm install --save-dev 'github:aztec-labs-eng/etherplan#v0.4.0-beta'
 npx etherplan --version
 ```
 
@@ -65,7 +65,7 @@ See [Deploy contracts](docs/deploy/index.md) for signers, spend limits, recovery
 ## More documentation
 
 - [Documentation](docs/README.md): find a guide by task.
-- [Project files](docs/project/index.md): HCL, variables, checks, workspaces, and config.
+- [Project files](docs/project/index.md): HCL, variables, checks, local modules, workspaces, and config.
 - [Deploy contracts](docs/deploy/index.md): plans, apply, recovery, fees, and pipelining.
 - [Verify contracts](docs/verify/index.md): live checks, creation proof, and rebuilt artifacts.
 - [Shared operations](docs/operations/index.md): AWS state, journals, and signers.

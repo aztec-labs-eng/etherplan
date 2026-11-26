@@ -214,6 +214,7 @@ describe('split execution dependencies on a private chain', () => {
       ['call:bindGamma'],
     ]);
     assert.deepEqual(planned.plan.warnings, [
+      'call:bindGamma call argument references contracts.gamma.address without an execution dependency; confirm its method does not call the referenced contract.',
       'contract:gamma constructor references contracts.alpha.address without an execution dependency; confirm its constructor does not call the referenced contract.',
     ]);
 

@@ -3,6 +3,7 @@ import type { ApplyResult, ReportEvent } from '../execution/types.ts';
 import type { Plan } from '../planning/types.ts';
 
 const STILL_APPLYING_MS = 30_000;
+const SLOW_STEP_MS = 1_000;
 
 /** Human-readable CLI progress. Structured event consumers use applyPlan's reporter directly. */
 export function createApplyProgress(plan: Plan, output: NodeJS.WriteStream = process.stderr) {
@@ -77,6 +78,13 @@ export function createApplyProgress(plan: Plan, output: NodeJS.WriteStream = pro
           break;
         case 'resource-resumed':
           write(`  ${event.actionId}: already verified in this plan`);
+          break;
+        case 'step':
+          // A short step would only add noise. Each step is in the structured result.
+          if (event.durationMs >= SLOW_STEP_MS)
+            write(
+              `  step ${event.step}${event.wave === undefined ? '' : ` (wave ${event.wave})`}: ${(event.durationMs / 1000).toFixed(1)}s${event.failed ? ', failed' : ''}`,
+            );
           break;
         default:
           break;

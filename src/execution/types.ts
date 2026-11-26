@@ -63,6 +63,7 @@ export interface SignerAccount {
 
 /** Local signing: `deployer[0]` alone is used unless `parallel`. */
 export interface Signers {
+  named?: Record<string, SignerAccount>;
   deployer: SignerAccount[];
   owner?: SignerAccount;
 }
@@ -85,11 +86,13 @@ export interface SignerProvider {
 
 /** Defaults: `deployer: ['deployer']`, `owner: 'owner'`. */
 export interface SignerRoles {
+  named?: Record<string, string>;
   deployer?: string[];
   owner?: string;
 }
 
 export interface SignerLanes {
+  named: Record<string, SignerAccount>;
   pool: SignerAccount[];
   owner: SignerAccount | null;
   /** Keyed by lowercase address. */
@@ -270,6 +273,11 @@ export interface JournalAppendOptions {
   expectedSequence: number;
   expectedPreviousHash: Hash | null;
   fence: FenceEntry[] | null;
+  /**
+   * Defaults to true. False appends a signed record without its signer-index row, for a `state push` of a record
+   * whose transaction an earlier record of the journal already indexed.
+   */
+  indexSigner?: boolean;
 }
 
 export interface JournalStore {
@@ -280,6 +288,17 @@ export interface JournalStore {
     record: StoredJournalRecord,
     options: JournalAppendOptions,
   ): Promise<StoredJournalRecord>;
+  /**
+   * Optional. Stores the first records of a contiguous run in one atomic write that has one head
+   * update, and returns how many it stored: one or more, and not all of them when the run is longer
+   * than the store accepts in one write. `options` gives the position of the first record. The run
+   * has no signed record. A store without it gets one `append` for each record.
+   */
+  appendBatch?(
+    scope: DeploymentScope,
+    records: StoredJournalRecord[],
+    options: JournalAppendOptions,
+  ): Promise<number>;
   signedForSigner(scope: DeploymentScope, address: string): AsyncIterable<SignedIndexEntry>;
 }
 
@@ -381,7 +400,14 @@ export interface DeploymentStatus {
 // Journal
 
 export type JournalPhase =
-  'intent' | 'signed' | 'broadcast-attempt' | 'broadcast' | 'receipt' | 'verified' | 'failed';
+  | 'intent'
+  | 'signed'
+  | 'broadcast-attempt'
+  | 'broadcast'
+  | 'receipt'
+  | 'verified'
+  | 'failed'
+  | 'moved';
 
 /** A transaction in one of these phases may still change the chain or hold its signer's next nonce. */
 export type LivePhase = 'signed' | 'broadcast-attempt' | 'broadcast' | 'receipt';
@@ -416,6 +442,7 @@ export interface ReceiptJson {
 
 /** What summarizeVerification keeps of a VerificationResult for journal and report output. */
 export interface VerificationSummary {
+  bindingState?: BindingObservation;
   status: VerificationStatus;
   address: Address;
   codeHash: Hash | null;
@@ -476,6 +503,8 @@ export type SignedFields = {
 
 export interface BroadcastAttemptFields {
   phase: 'broadcast-attempt';
+  /** A verified receipt was reorganized; recover these exact signed bytes before dependent reservations. */
+  reorgRecovery?: true;
   signer: Address;
   nonce: DecimalString;
   transactionHash: Hash;
@@ -538,6 +567,18 @@ export interface FailedFields {
   spentWei?: DecimalString;
 }
 
+/**
+ * A record that `state mv` took from the journal of another scope. `record` is that record, unchanged. The envelope
+ * has the plan hash of that record and the resource ID that its action has in this scope. Only a stored journal has
+ * these records, and apply writes none.
+ */
+export interface MovedFields {
+  phase: 'moved';
+  /** The scope key and the resource ID that the record had. */
+  movedFrom: { scope: string; actionId: ResourceId };
+  record: Exclude<StoredJournalRecord, { phase: 'moved' }>;
+}
+
 export type JournalPhaseFields =
   | IntentFields
   | SignedFields
@@ -545,7 +586,8 @@ export type JournalPhaseFields =
   | BroadcastFields
   | ReceiptFields
   | VerifiedFields
-  | FailedFields;
+  | FailedFields
+  | MovedFields;
 
 export interface JournalIdentity {
   planHash: Hash;
@@ -597,6 +639,18 @@ export interface Journal {
   records: JournalRecord[];
   /** Appends are serialized; the promise resolves only after the record is durable. */
   append(fields: JournalRecordInput): Promise<JournalRecord>;
+  /**
+   * Present when the store has batch writes. Appends a run of records that has no signed record, in
+   * order and in as few writes as the store accepts. It resolves when all of them are durable. After
+   * a rejection, the records of the writes that succeeded are durable and are in `records`.
+   */
+  appendAll?(fields: JournalRecordInput[]): Promise<JournalRecord[]>;
+  /**
+   * Present on a stored journal. Encrypts the bytes of a signed record now, outside the queue of
+   * writes, so that the append of the same record stores that ciphertext. It resolves when the
+   * encryption ends and it never rejects: after a failure, the append encrypts again.
+   */
+  prepare?(fields: JournalRecordInput): Promise<void>;
   forAction(planHash: Hash, actionId: ResourceId): JournalRecord[];
   close(): Promise<void>;
 }
@@ -606,7 +660,7 @@ export type IntentRecord = JournalRecord & IntentFields;
 
 /** A signed transaction that may still reach the chain, from liveTransactions. */
 export interface LiveTransaction {
-  latest: JournalRecord;
+  latest: Exclude<JournalRecord, { phase: 'moved' }>;
   signed: SignedRecord;
 }
 
@@ -623,6 +677,8 @@ export interface OpenStoredJournalInput {
   scope: DeploymentScope;
   fence: FenceEntry[] | null;
   assertHeld(): Promise<void>;
+  /** The plan being applied. When set, only its signatures and unresolved ones are decrypted. */
+  planHash?: Hash;
 }
 
 // Errors and events
@@ -718,6 +774,7 @@ export type ReportEvent = ReportEventBase &
       }
     | { type: 'recovery'; actionId: ResourceId; transactionHash: Hash; reservationId?: string }
     | { type: 'resource-reused' | 'resource-resumed'; actionId: ResourceId }
+    | { type: 'step'; step: ApplyStep; wave?: number; durationMs: number; failed?: boolean }
   );
 
 export type ReportEventType = ReportEvent['type'];
@@ -855,6 +912,39 @@ export interface ApplyTimings {
   verificationMs: number;
 }
 
+/** The steps of an apply that are timed. The steps from receipt-sweep to intents prepare one group. */
+export type ApplyStep =
+  | 'preflight'
+  | 'settle-journal'
+  | 'recheck-reused'
+  | 'receipt-sweep'
+  | 'wave-verifications'
+  | 'resume-wave'
+  | 'decide'
+  | 'estimate'
+  | 'funding'
+  | 'replay-capability'
+  | 'prerequisites'
+  | 'signer-history'
+  | 'nonces'
+  | 'intents'
+  | 'sign'
+  | 'store-signatures'
+  | 'settle'
+  | 'final-receipts'
+  | 'final-verification'
+  | 'state-commit';
+
+/** The wall time of one step. The steps do not overlap, so their times can be added. */
+export interface StepTiming {
+  step: ApplyStep;
+  /** The schedule wave that the step belongs to, when it belongs to one. */
+  wave?: number;
+  startedAt: string;
+  ms: number;
+  failed?: true;
+}
+
 export type StateWriteResult =
   | { file: string | null; written: false; reason?: string }
   | { file: string | null; written: true; resources: number };
@@ -904,6 +994,8 @@ export interface ApplyResult {
   parallel: boolean;
   pipeline: boolean;
   timings: ApplyTimings;
+  /** Each timed step in the order that it ended. */
+  steps: StepTiming[];
   transactionsSigned: number;
   transactions: SentTransaction[];
   rebroadcasts: { actionId: ResourceId; transactionHash: Hash }[];
@@ -951,6 +1043,8 @@ export interface WaitForReceiptInput {
   nonce: DecimalString | number;
   pollIntervalMs: number;
   timeoutMs: number;
+  /** The enclosing receipt deadline, when timeoutMs is a shorter pipeline polling slice. */
+  retryDeadline?: number;
   /** The apply's receipt timeout. It limits the wait for a receipt after the nonce shows as used. */
   receiptTimeoutMs: number;
 }

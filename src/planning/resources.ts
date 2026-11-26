@@ -1,3 +1,4 @@
+import { callTarget } from '../spec/call-target.ts';
 import { concatHex, getContractAddress, isAddress, keccak256 } from 'viem';
 import { hashJson } from '../identity.ts';
 import { graph, parseSpec, resolve, usesDependencyPlan } from '../spec/index.ts';
@@ -13,6 +14,7 @@ import type {
   ParsedSpec,
   ResolvedAddresses,
   SpecChecks,
+  SpecCallBinding,
   SpecContract,
 } from '../spec/types.ts';
 import type { Address, Hash, Hex, JsonValue, ResourceId } from '../types.ts';
@@ -21,6 +23,7 @@ import type {
   PreparedBinding,
   PreparedCall,
   PreparedCallCheck,
+  PreparedCallBinding,
   PreparedCheck,
   PreparedContract,
   PreparedExternal,
@@ -152,6 +155,7 @@ function buildContract(
   if (Object.keys(libraries).length > 0) resource.libraries = libraries;
   if (item.codeHash !== undefined) resource.expectedCodeHash = item.codeHash;
   if (item.ignoreMetadata) resource.ignoreMetadata = true;
+  if (item.createdBy) resource.createdBy = item.createdBy;
   if (item.creationProofMode === 'pinned-runtime') {
     resource.creationProofMode = item.creationProofMode;
     resource.createdCode = item.createdCode!.map((child) => ({
@@ -179,37 +183,91 @@ function buildCall(
   spec: ParsedSpec,
   addresses: ResolvedAddresses,
   contracts: Map<string, PreparedContract>,
+  externals: Map<string, PreparedExternal>,
   describeDependencies: boolean,
 ): PreparedCall {
   const item = node.item;
-  const target = contracts.get(item.target);
-  assert(target, `${node.id} has unresolved target contract:${item.target}.`);
-  const checkArgs = resolve(item.check.args, spec, addresses);
-  const after: PreparedBinding = {
-    functionName: item.check.function,
-    args: checkArgs,
-    expected: resolve(item.check.equals, spec, addresses),
+  const info = callTarget(item.target);
+  const target = info.id.startsWith('external:')
+    ? externals.get(info.name)
+    : contracts.get(info.name);
+  assert(target, `${node.id} has unresolved target ${info.id}.`);
+  const child =
+    info.getter && target.kind === 'contract'
+      ? target.createdCode?.find((entry) => entry.getter === info.getter)
+      : undefined;
+  assert(!info.getter || child, `${node.id} has no pinned created getter ${info.getter}.`);
+  const abi = item.abi ?? (target.kind === 'contract' ? target.artifact.abi : target.abi);
+  assert(abi, `${node.id} target needs an ABI.`);
+  const prepareBinding = (binding: SpecCallBinding): PreparedCallBinding => {
+    const { check: predicate, before: previous } = binding;
+    const revert = (expected: NonNullable<typeof previous.revert>) => ({
+      error: expected.error,
+      args: resolve(expected.args, spec, addresses),
+    });
+    const checkArgs = resolve(predicate.args, spec, addresses);
+    const checkAddress =
+      predicate.address === undefined ? undefined : resolve(predicate.address, spec, addresses);
+    assert(
+      checkAddress === undefined || (typeof checkAddress === 'string' && isAddress(checkAddress)),
+      `${node.id} has an invalid check address.`,
+    );
+    const checkAt = checkAddress === undefined ? {} : { address: checkAddress as Address };
+    const after: PreparedBinding = {
+      ...checkAt,
+      functionName: predicate.function,
+      args: checkArgs,
+      expected: predicate.revert ? null : resolve(predicate.equals!, spec, addresses),
+      ...(predicate.revert ? { revert: revert(predicate.revert) } : {}),
+    };
+    const before: PreparedBinding = {
+      ...checkAt,
+      ...(previous.absent ? { absent: true as const } : {}),
+      functionName: predicate.function,
+      args: checkArgs,
+      expected:
+        previous.absent || previous.revert ? null : resolve(previous.equals!, spec, addresses),
+      ...(previous.revert ? { revert: revert(previous.revert) } : {}),
+    };
+    const check: PreparedCallCheck = {
+      ...checkAt,
+      functionName: predicate.function,
+      args: checkArgs,
+    };
+    return { check, before, after };
   };
-  const before: PreparedBinding = {
-    functionName: item.check.function,
-    args: checkArgs,
-    expected: resolve(item.before.equals, spec, addresses),
-  };
-  const check: PreparedCallCheck = { functionName: item.check.function, args: checkArgs };
+  const { check, before, after } = prepareBinding(item);
+  const additionalChecks = item.additionalChecks?.map(prepareBinding);
+  if (additionalChecks) {
+    const bindings = [{ check, before, after }, ...additionalChecks];
+    const address = (after.address ?? (child ? child.address : target.address)).toLowerCase();
+    assert(
+      bindings.every(
+        (binding) =>
+          !binding.before.absent &&
+          (binding.after.address ?? (child ? child.address : target.address)).toLowerCase() ===
+            address,
+      ),
+      `${node.id} grouped checks need one checked address and cannot use before.absent.`,
+    );
+    const keys = bindings.map((binding) => JSON.stringify(binding.check));
+    assert(new Set(keys).size === keys.length, `${node.id} has duplicate getter checks.`);
+  }
   const resource: PreparedCall = {
     id: node.id,
     kind: 'call',
     dependencies: [...node.dependencies].sort(),
     ...dependencyFields(node, describeDependencies),
-    address: target.address,
+    address: child ? child.address : target.address,
     targetId: target.id,
-    targetArtifact: target.artifact,
-    abi: target.artifact.abi,
+    ...(target.kind === 'contract' ? { targetArtifact: target.artifact } : {}),
+    abi,
     method: item.method,
     args: resolve(item.args, spec, addresses),
     check,
     before,
     after,
+    ...(additionalChecks ? { additionalChecks } : {}),
     signerRole: item.signerRole ?? 'owner',
     ...(describeDependencies
       ? {
@@ -238,19 +296,32 @@ export function prepareResources(
   const addresses: ResolvedAddresses = {};
   const resources: PreparedResource[] = [];
   const contracts = new Map<string, PreparedContract>();
+  const externals = new Map<string, PreparedExternal>();
 
   for (const node of ordered) {
     if (node.kind === 'external') {
-      resources.push(buildExternal(node, spec, addresses, describeDependencies));
+      const resource = buildExternal(node, spec, addresses, describeDependencies);
+      externals.set(node.id.slice('external:'.length), resource);
+      resources.push(resource);
     } else if (node.kind === 'contract') {
       const resource = buildContract(node, spec, addresses, artifacts, describeDependencies);
       contracts.set(node.item.id, resource);
       resources.push(resource);
     } else {
-      resources.push(buildCall(node, spec, addresses, contracts, describeDependencies));
+      resources.push(buildCall(node, spec, addresses, contracts, externals, describeDependencies));
     }
   }
 
+  for (const resource of resources) {
+    if (resource.kind !== 'contract' || !resource.createdBy) continue;
+    const creator = resources.find((item) => item.id === resource.createdBy);
+    assert(
+      creator?.kind === 'call' &&
+        creator.before.absent === true &&
+        creator.after.address?.toLowerCase() === resource.address.toLowerCase(),
+      `${resource.id} createdBy needs a creator call with before_absent and a checked result at the same address.`,
+    );
+  }
   validateResources(resources);
   return { resources, addresses };
 }

@@ -1,7 +1,7 @@
 // Parses the subset of HCL native syntax that Etherplan reads: attributes, blocks, comments, quoted
 // strings, whole numbers, booleans, null, lists, objects, references such as var.owner, conditionals,
 // comparison and logical operators, parentheses, and function-call syntax. A file it accepts means the same
-// thing to HCL. It rejects templates, heredocs, arithmetic, for expressions, and index expressions. It only
+// thing to HCL. It rejects templates, heredocs, arithmetic, for expressions, and non-module indices. It only
 // builds the tree; compile.ts evaluates it. Every node records its file, line, and column.
 
 import type {
@@ -512,8 +512,24 @@ class Parser {
       if (part.type !== 'ident') fail(part, `Expected a name after ".", found ${describe(part)}.`);
       parts.push(part.value);
     }
-    if (this.peek().type === '[')
-      fail(this.peek(), 'Index and splat expressions are not supported.');
+    if (this.peek().type === '[') {
+      if (parts[0] !== 'module' || parts.length !== 2)
+        fail(
+          this.peek(),
+          'Index and splat expressions are not supported. Only module.<name>[<key>].<output> accepts an index.',
+        );
+      this.next();
+      const key = this.expression(true);
+      this.skipNewlines();
+      if (this.next().type !== ']') fail(this.peek(), 'Expected ] after the module key.');
+      if (this.next().type !== '.') fail(this.peek(), 'A keyed module reference needs .<output>.');
+      const output = this.next();
+      if (output.type !== 'ident') fail(output, 'Expected an output name after the module key.');
+      parts.push(output.value);
+      if (this.peek().type === '[' || this.peek().type === '.')
+        fail(this.peek(), 'Only module.<name>[<key>].<output> accepts an index.');
+      return { kind: 'reference', parts, key, at: first.at };
+    }
     return { kind: 'reference', parts, at: first.at };
   }
 

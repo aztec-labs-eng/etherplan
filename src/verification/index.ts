@@ -9,8 +9,10 @@ import {
   linkedLibraries,
 } from './bytecode.ts';
 import { decodeMetadataTail } from './metadata.ts';
+import { readSource } from './shared-reads.ts';
 import { replayProviderFailure, simulateCreate2 } from './simulate.ts';
 import { abiArguments, normalizeOutputs, safeError, sameJson } from './values.ts';
+import { expectedRevert, revertData } from './reverts.ts';
 import { abiFunction } from '../validation/index.ts';
 import { DEFAULT_FACTORY } from '../spec/index.ts';
 import { validateCreationProof } from './creation-proof.ts';
@@ -64,6 +66,21 @@ export { PROBE_ADDRESS, PROBE_CODE, simulateCreate, simulateCreate2 } from './si
 export { abiArguments, normalizeAbiValue, normalizeOutputs, safeError } from './values.ts';
 
 const PINNED_MINT = Symbol('pinned-runtime apply mint');
+const READ_FAILURES = Symbol('apply read failures');
+const CREATION_CACHE = Symbol('apply creation evidence');
+type CreationCache = WeakMap<PreparedContract, { client: Client; creation: CreationVerification }>;
+
+const NOT_FOUND = /^(?:Transaction|TransactionReceipt|Block)NotFoundError$/;
+const inconclusive = new WeakSet<VerificationResult>();
+
+export function createApplyVerifier(): typeof verifyResourceForApply {
+  const cache: CreationCache = new WeakMap();
+  return (resource, client, options = {}) =>
+    verifyResourceForApply(resource, client, {
+      ...options,
+      [CREATION_CACHE]: cache,
+    } as VerifyOptions);
+}
 
 /** Internal apply entry point. A public verification call can revalidate a saved pin but cannot mint one. */
 export async function verifyResourceForApply(
@@ -71,7 +88,45 @@ export async function verifyResourceForApply(
   client: Client,
   options: VerifyOptions = {},
 ): Promise<VerificationResult> {
-  return verifyResource(resource, client, { ...options, [PINNED_MINT]: true } as VerifyOptions);
+  return verifyResourceTracked(resource, client, {
+    ...options,
+    [PINNED_MINT]: true,
+  } as VerifyOptions);
+}
+
+/**
+ * Internal: public verification that also records whether a failed result rests on reads that a
+ * retry or another RPC could complete. The result itself is unchanged.
+ */
+export async function verifyResourceTracked(
+  resource: PreparedResource,
+  client: Client,
+  options: VerifyOptions = {},
+): Promise<VerificationResult> {
+  const reads = { failed: false };
+  const result = await verifyResource(resource, client, {
+    ...options,
+    [READ_FAILURES]: reads,
+  } as VerifyOptions);
+  if (reads.failed && result.status !== 'verified') inconclusive.add(result);
+  return result;
+}
+
+/** True for a tracked result whose provider failed, or briefly lacked a transaction, receipt or block. */
+export function verificationInconclusive(result: VerificationResult): boolean {
+  return inconclusive.has(result);
+}
+
+/**
+ * Notes a read that left evidence incomplete, for apply only; public results stay unchanged.
+ * Without an error, the provider answered with nothing. Returns whether the provider failed.
+ */
+function readFailed(options: object, error?: unknown): boolean {
+  const provider = error !== undefined && replayProviderFailure(error);
+  const reads = (options as { [READ_FAILURES]?: { failed: boolean } })[READ_FAILURES];
+  if (reads && (provider || error === undefined || NOT_FOUND.test(String((error as Error)?.name))))
+    reads.failed = true;
+  return provider;
 }
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -151,6 +206,7 @@ async function getterProof(
   check: PreparedCheck & { args?: JsonValue[] },
   abi: NormalizedArtifact['abi'] | undefined,
   blockNumber: bigint | undefined,
+  options: object,
 ): Promise<{ proof: Proof; fn: AbiFunction }> {
   const args = check.args ?? [];
   const fn = abiFunction(abi, check.functionName, args.length, resource.id);
@@ -175,6 +231,7 @@ async function getterProof(
     );
     proof.matched = sameJson(expected, proof.actual);
   } catch (error) {
+    readFailed(options, error);
     proof.error = safeError(error);
   }
   return { proof, fn };
@@ -276,6 +333,56 @@ function immutableLabel(info: NamedImmutable | undefined, id: string): string {
   return info?.name ? `${info.name} (AST ${id})` : `AST ${id}`;
 }
 
+async function recheckCreation(
+  known: CreationVerification,
+  resource: PreparedContract,
+  client: Client,
+  options: VerifyOptions,
+): Promise<CreationVerification> {
+  const proof = known.proof!;
+  const result = structuredClone(known);
+  delete result.proof;
+  result.status = 'unverified';
+  result.exactRuntime = false;
+  try {
+    const block = await client.getBlock({ blockNumber: BigInt(proof.blockNumber) });
+    if (lower(block.hash) !== lower(proof.blockHash)) {
+      result.reasons.push('Saved creation block is no longer canonical.');
+      return result;
+    }
+    for (const child of result.createdCode ?? []) {
+      const fn = abiFunction(resource.artifact.abi, child.getter, 0, resource.id);
+      const [getter, code] = await Promise.all([
+        readFunction(client, {
+          address: resource.address,
+          fn,
+          args: [],
+          blockNumber: blockOf(options.blockNumber),
+        }),
+        client.getCode({ address: child.address, ...at(blockOf(options.blockNumber)) }),
+      ]);
+      child.currentGetter = typeof getter === 'string' ? (getter as Address) : null;
+      child.currentCodeHash = hasCode(code) ? keccak256(code) : null;
+      child.matched =
+        lower(child.currentGetter) === lower(child.address) &&
+        lower(child.currentCodeHash) === lower(child.codeHash);
+      if (!child.matched) {
+        result.reasons.push(
+          'Created child differs from its getter address or precommitted runtime hash.',
+        );
+        return result;
+      }
+    }
+    result.status = 'verified';
+    result.exactRuntime = true;
+    result.proof = proof;
+  } catch (error) {
+    if (readFailed(options, error)) result.replayFailure = 'provider';
+    result.reasons.push('Creation anchor or current child state is not available.');
+  }
+  return result;
+}
+
 async function creationEvidence(
   result: VerificationResult,
   resource: PreparedContract,
@@ -284,10 +391,27 @@ async function creationEvidence(
   options: VerifyOptions,
   code: Hex,
 ): Promise<ProofMethod | null> {
-  const creation = await verifyCreation(client, resource, transactionHash, {
-    ...options,
-    liveCode: code,
-  });
+  const cache = (options as VerifyOptions & { [CREATION_CACHE]?: CreationCache })[CREATION_CACHE];
+  const known = cache?.get(resource);
+  const priorProof = known?.creation.proof;
+  // A boundary reads through its own view of the client. The evidence belongs to the provider behind it.
+  const source = readSource(client);
+  const reusable =
+    known?.client === source &&
+    priorProof &&
+    lower(priorProof.transactionHash) === lower(transactionHash) &&
+    sameJson(priorProof, options.creationProof) &&
+    lower(priorProof.codeHash) === keccak256(code) &&
+    (!options.expectedCreator || lower(options.expectedCreator) === lower(priorProof.creator)) &&
+    (!options.chain ||
+      (options.chain.id === priorProof.chain.id &&
+        lower(options.chain.genesisHash) === lower(priorProof.chain.genesisHash)));
+  const creation = reusable
+    ? await recheckCreation(known.creation, resource, client, options)
+    : await verifyCreation(client, resource, transactionHash, { ...options, liveCode: code });
+  if (creation.status === 'verified' && creation.proof)
+    cache?.set(resource, { client: source, creation: structuredClone(creation) });
+  else cache?.delete(resource);
   const method =
     creation.method === 'pinned-runtime'
       ? 'pinned-runtime'
@@ -579,7 +703,14 @@ async function verifyContract(
     (artifact.immutables ?? []).filter((item) => item.getter).map((item) => [item.getter, item]),
   );
   for (const check of resource.checks ?? []) {
-    const { proof, fn } = await getterProof(client, resource, check, artifact.abi, blockNumber);
+    const { proof, fn } = await getterProof(
+      client,
+      resource,
+      check,
+      artifact.abi,
+      blockNumber,
+      options,
+    );
     recordGetter(result, proof);
     const immutable = byGetter.get(check.functionName);
     if (!immutable || (fn.inputs ?? []).length !== 0 || (fn.outputs ?? []).length !== 1) continue;
@@ -669,7 +800,10 @@ async function verifyExternal(
     resource.abi ??
     (resource as PreparedExternal & { artifact?: NormalizedArtifact }).artifact?.abi;
   for (const check of checks)
-    recordGetter(result, (await getterProof(client, resource, check, abi, blockNumber)).proof);
+    recordGetter(
+      result,
+      (await getterProof(client, resource, check, abi, blockNumber, options)).proof,
+    );
   return finish(result);
 }
 
@@ -678,6 +812,38 @@ async function verifyCall(
   client: Client,
   options: VerifyOptions,
 ): Promise<VerificationResult> {
+  if (resource.additionalChecks) {
+    if (options.blockNumber === undefined)
+      options = { ...options, blockNumber: (await client.getBlock({ blockTag: 'latest' })).number };
+    const { additionalChecks, ...base } = resource;
+    const bindings = [base, ...additionalChecks.map((binding) => ({ ...base, ...binding }))];
+    const results: VerificationResult[] = [];
+    for (const binding of bindings) results.push(await verifyCall(binding, client, options));
+    const result = results[0]!;
+    const allAfter = results.every((item) => item.bindingChecks[0]?.observed === 'after');
+    const allBefore = results.every((item, index) => {
+      const observed = item.bindingChecks[0]!;
+      return (
+        observed.observed === 'before' ||
+        (observed.observed === 'after' &&
+          Boolean(bindings[index]!.before.revert) === Boolean(bindings[index]!.after.revert) &&
+          sameJson(observed.expectedBefore, observed.expectedAfter))
+      );
+    });
+    result.bindingState = allAfter
+      ? 'after'
+      : allBefore
+        ? 'before'
+        : results.every((item) => item.bindingChecks[0]?.targetAbsent)
+          ? 'read-failed'
+          : 'other';
+    result.bindingChecks = results.flatMap((item) => item.bindingChecks);
+    result.missingProofs = results.flatMap((item) => item.missingProofs);
+    result.reasons = results.flatMap((item) => item.reasons);
+    if (result.bindingState === 'other' && result.reasons.length === 0)
+      result.reasons.push('Getter checks do not match one complete before or after snapshot.');
+    return finish(result);
+  }
   const result = newResult(resource);
   const blockNumber = blockOf(options.blockNumber);
   const after = resource.after;
@@ -697,16 +863,16 @@ async function verifyCall(
     (resource as PreparedCall & { artifact?: NormalizedArtifact }).artifact?.abi;
   const args = after.args ?? [];
   const fn = abiFunction(abi, after.functionName, args.length, resource.id);
-  const expectedAfter = normalizeOutputs(
-    fn.outputs ?? [],
-    after.expected,
-    `${resource.id} after.expected`,
-  );
-  const expectedBefore = normalizeOutputs(
-    fn.outputs ?? [],
-    before.expected,
-    `${resource.id} before.expected`,
-  );
+  const afterRevert = after.revert ? expectedRevert(abi, after.revert, resource.id) : undefined;
+  const beforeRevert = before.revert ? expectedRevert(abi, before.revert, resource.id) : undefined;
+  const expectedAfter = afterRevert
+    ? { revert: afterRevert }
+    : normalizeOutputs(fn.outputs ?? [], after.expected, `${resource.id} after.expected`);
+  const expectedBefore = beforeRevert
+    ? { revert: beforeRevert }
+    : before.absent
+      ? null
+      : normalizeOutputs(fn.outputs ?? [], before.expected, `${resource.id} before.expected`);
   const binding: BindingCheck = {
     name: resource.id,
     functionName: after.functionName,
@@ -718,28 +884,44 @@ async function verifyCall(
   if (args.length > 0) binding.args = args;
   result.bindingChecks.push(binding);
 
-  const code = await client.getCode({ address: resource.address, ...at(blockNumber) });
+  const checkAddress = after.address ?? resource.address;
+  const code = await client.getCode({ address: checkAddress, ...at(blockNumber) });
   if (!hasCode(code)) {
     binding.targetAbsent = true;
+    if (before.absent) {
+      binding.observed = 'before';
+      result.missingProofs.push('The checked address has no code; its creation call is pending.');
+      return finish(result);
+    }
     binding.error = 'Target contract has no code.';
     result.missingProofs.push('Target contract has no code yet, so the binding cannot be read.');
     return finish(result);
   }
   result.codeHash = keccak256(code);
   result.codeComparison = { mode: 'presence', matched: true };
+  let reverted = false;
   try {
     binding.actual = normalizeOutputs(
       fn.outputs ?? [],
-      await readFunction(client, { address: resource.address, fn, args, blockNumber }),
+      await readFunction(client, { address: checkAddress, fn, args, blockNumber }),
       `${resource.id} ${after.functionName}`,
     );
   } catch (error) {
-    binding.error = safeError(error);
-    result.reasons.push(`Binding read ${after.functionName} failed: ${binding.error}`);
-    return finish(result);
+    const raw = revertData(error);
+    if (raw !== undefined && (raw === beforeRevert || raw === afterRevert)) {
+      binding.actual = { revert: raw };
+      reverted = true;
+    } else {
+      readFailed(options, error);
+      binding.error = safeError(error);
+      result.reasons.push(`Binding read ${after.functionName} failed: ${binding.error}`);
+      return finish(result);
+    }
   }
-  if (sameJson(binding.actual, expectedAfter)) binding.observed = 'after';
-  else if (sameJson(binding.actual, expectedBefore)) binding.observed = 'before';
+  if (reverted === Boolean(afterRevert) && sameJson(binding.actual, expectedAfter))
+    binding.observed = 'after';
+  else if (reverted === Boolean(beforeRevert) && sameJson(binding.actual, expectedBefore))
+    binding.observed = 'before';
   else binding.observed = 'other';
   if (binding.observed === 'before')
     result.missingProofs.push(
@@ -804,11 +986,12 @@ export async function verifyCreation(
     transaction = await client.getTransaction({ hash: transactionHash });
     receipt = await client.getTransactionReceipt({ hash: transactionHash });
   } catch (error) {
-    if (replayProviderFailure(error)) result.replayFailure = 'provider';
+    if (readFailed(options, error)) result.replayFailure = 'provider';
     result.reasons.push(`Creation transaction is not available: ${safeError(error)}`);
     return result;
   }
   if (!transaction || !receipt) {
+    readFailed(options);
     result.reasons.push('Creation transaction or receipt is not available.');
     return result;
   }
@@ -845,7 +1028,7 @@ export async function verifyCreation(
     };
     block = await client.getBlock({ blockNumber: receipt.blockNumber });
   } catch (error) {
-    if (replayProviderFailure(error)) result.replayFailure = 'provider';
+    if (readFailed(options, error)) result.replayFailure = 'provider';
     result.reasons.push(`Creation block is not available: ${safeError(error)}`);
     return result;
   }
@@ -884,7 +1067,7 @@ export async function verifyCreation(
       options.liveCode ??
       (await client.getCode({ address: resource.address, ...at(blockOf(options.blockNumber)) }));
   } catch (error) {
-    if (replayProviderFailure(error)) result.replayFailure = 'provider';
+    if (readFailed(options, error)) result.replayFailure = 'provider';
     result.reasons.push(`Current runtime is not available: ${safeError(error)}`);
     return result;
   }
@@ -999,7 +1182,7 @@ export async function verifyCreation(
           blockNumber: receipt.blockNumber,
         });
     } catch (error) {
-      if (replayProviderFailure(error)) result.replayFailure = 'provider';
+      if (readFailed(options, error)) result.replayFailure = 'provider';
       result.reasons.push(`CREATE2 factory code is not available: ${safeError(error)}`);
       return result;
     }
@@ -1055,7 +1238,7 @@ export async function verifyCreation(
       blockNumber: receipt.blockNumber,
     });
   } catch (error) {
-    if (replayProviderFailure(error)) result.replayFailure = 'provider';
+    if (readFailed(options, error)) result.replayFailure = 'provider';
     result.reasons.push(`Runtime at the creation block is not available: ${safeError(error)}`);
     return result;
   }
@@ -1106,6 +1289,7 @@ export async function verifyCreation(
           check,
           resource.artifact.abi,
           checkBlock,
+          options,
         );
         if (!getter.matched) {
           result.reasons.push(
@@ -1198,6 +1382,7 @@ export async function verifyCreation(
           lower(evidence.receiptCodeHash) === lower(child.codeHash) &&
           lower(evidence.currentCodeHash) === lower(child.codeHash);
       } catch (error) {
+        readFailed(options, error);
         result.reasons.push(
           `Created child ${child.getter} cannot be checked at receipt and current blocks: ${safeError(error)}`,
         );
@@ -1235,7 +1420,7 @@ export async function verifyCreation(
     });
     result.exactRuntime = lower(runtime) === lower(receiptCode);
   } catch (error) {
-    if (replayProviderFailure(error)) {
+    if (readFailed(options, error)) {
       result.replayFailure = 'provider';
       result.reasons.push(
         'Creation simulation at the receipt block could not be completed by the RPC provider. Retry this saved plan with a compatible RPC endpoint.',

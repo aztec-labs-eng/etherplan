@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { concatHex, encodeDeployData, keccak256, pad } from 'viem';
+import { loadDependencies } from '../src/execution/dependencies.ts';
 import { normalizeArtifact } from '../src/artifacts.ts';
 import { canonicalJson, hashJson } from '../src/identity.ts';
 import { STATEFUL_CONSTRUCTOR_LIMITATION_URL } from '../src/verification/limitations.ts';
@@ -894,4 +895,61 @@ test('verification results are plain JSON and deterministic', async () => {
   ])
     assert.ok(Object.hasOwn(first, key), key);
   assert.equal(canonicalJson(JSON.parse(JSON.stringify(first))), canonicalJson(first));
+});
+
+test('apply reuses validated creation facts through history outages while refreshing current state and anchors', async () => {
+  const resource = deployable('Sample', [ONE, LABEL], {
+    checks: [{ functionName: 'UPSTREAM', expected: ONE }],
+  });
+  const address = resource.address.toLowerCase();
+  const live = sampleCode(resource.address);
+  const hash = '0x' + 'c2'.repeat(32);
+  const codes = { [address]: live, [factory.address.toLowerCase()]: FACTORY_CODE };
+  const reads = { [address + ':UPSTREAM']: ONE };
+  const client = mockClient({
+    codes,
+    reads,
+    call: async () => ({ data: live }),
+    transactions: {
+      [hash]: { to: factory.address, from: HERE, input: concatHex([SALT, resource.initcode]) },
+    },
+    receipts: { [hash]: { status: 'success', blockNumber: 9n, blockHash: RECEIPT_HASH } },
+  });
+  const verify = loadDependencies().verifyResource;
+  const first = await verify(resource, client, { transactionHash: hash, blockNumber: 10n });
+  assert.equal(first.status, 'verified');
+  const options = { creationProof: first.creationProof, blockNumber: 11n };
+  client.getTransaction = client.getTransactionReceipt = async () => {
+    throw new Error('history unavailable');
+  };
+  assert.equal((await verify(resource, client, options)).status, 'verified');
+  assert.equal(
+    (await loadDependencies().verifyResource(resource, client, options)).status,
+    'unverified',
+  );
+  assert.equal((await verifyResource(resource, client, options)).status, 'unverified');
+  const tampered = {
+    ...options,
+    creationProof: { ...first.creationProof, blockHash: GENESIS_HASH },
+  };
+  assert.notEqual((await verify(resource, client, tampered)).status, 'verified');
+  client.getTransaction = async () => ({
+    to: factory.address,
+    from: HERE,
+    input: concatHex([SALT, resource.initcode]),
+  });
+  client.getTransactionReceipt = async () => ({
+    status: 'success',
+    blockNumber: 9n,
+    blockHash: RECEIPT_HASH,
+  });
+  assert.equal((await verify(resource, client, options)).status, 'verified');
+  reads[address + ':UPSTREAM'] = TWO;
+  assert.equal((await verify(resource, client, options)).status, 'conflict');
+  reads[address + ':UPSTREAM'] = ONE;
+  codes[address] = '0x00';
+  assert.equal((await verify(resource, client, options)).status, 'conflict');
+  codes[address] = live;
+  client.getBlock = async ({ blockNumber }) => ({ number: blockNumber, hash: GENESIS_HASH });
+  assert.notEqual((await verify(resource, client, options)).status, 'verified');
 });

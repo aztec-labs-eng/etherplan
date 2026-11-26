@@ -49,6 +49,7 @@ after(async () => {
 test('apply deploys and binds once, writes durable state, and reruns without a transaction', async () => {
   const preview = runCli([
     'plan',
+    '--json',
     '--out',
     '-',
     '--state',
@@ -65,6 +66,7 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
 
   const planned = runCli([
     'plan',
+    '--json',
     '--out',
     planFile,
     '--state',
@@ -102,6 +104,9 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
   assert.equal(declined.status, 1);
   assert.match(declined.stderr, /Only 'yes' will be accepted/);
   assert.match(declined.stderr, /Apply cancelled/);
+  assert.match(declined.stderr, /contract:stateFixture: DEPLOY at 0x/);
+  assert.match(declined.stderr, /call:bind: CALL .*setBinding\(/);
+  assert.doesNotMatch(declined.stderr, /\"resources\"|\"data\"/);
   assert.equal(await anvil.rpc('eth_getTransactionCount', [owner, 'latest']), nonceBefore);
   await assert.rejects(access(stateFile), { code: 'ENOENT' });
   await assert.rejects(access(journalFile), { code: 'ENOENT' });
@@ -192,11 +197,7 @@ test('apply deploys and binds once, writes durable state, and reruns without a t
     true,
   );
   assert.equal(rerun.status, 0, `${rerun.stderr}\n${rerun.stdout}`);
-  assert.match(rerun.stderr, /^Variables:\n/);
-  assert.doesNotMatch(
-    rerun.stderr,
-    /Applying plan|Apply lock acquired|Still applying|Apply complete/,
-  );
+  assert.equal(rerun.stderr, '');
   const second = JSON.parse(rerun.stdout);
   assert.equal(second.transactionsSigned, 0);
   assert.equal(second.transactions.length, 0);
@@ -310,6 +311,7 @@ test('B1: a rebuilt artifact with the same bytecode is reused and rebaselined wi
 
   const planned = runCli([
     'plan',
+    '--json',
     '--out',
     planFile,
     '--state',
@@ -369,6 +371,7 @@ test('B1: a rebuilt artifact with the same bytecode is reused and rebaselined wi
 
   const replanned = runCli([
     'plan',
+    '--json',
     '--out',
     planFile,
     '--state',

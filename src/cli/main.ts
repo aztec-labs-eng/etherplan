@@ -11,7 +11,6 @@ import {
   selectWorkspace,
   withConfig,
 } from '../input/project.ts';
-import type { VariableValue } from '../input/variables.ts';
 import { graph } from '../spec/index.ts';
 import { adapters } from './commands/adapters.ts';
 import { apply } from './commands/apply.ts';
@@ -23,6 +22,8 @@ import { init } from './commands/init.ts';
 import { output } from './commands/output.ts';
 import { plan } from './commands/plan.ts';
 import { schedule } from './commands/schedule.ts';
+import { stateMove, statePull, statePush } from './commands/state.ts';
+import { stateRm } from './commands/state-rm.ts';
 import { status } from './commands/status.ts';
 import { unfinished } from './commands/unfinished.ts';
 import { validate } from './commands/validate.ts';
@@ -47,16 +48,14 @@ import type { CliOptions, CommandName } from './options.ts';
 import { print } from './shared.ts';
 import { formatApplyReport } from './reporting.ts';
 
-function variableReport(variables: VariableValue[]): string {
-  const width = Math.max(...variables.map((variable) => variable.name.length));
-  return `Variables:\n${variables.map((variable) => `  ${variable.name.padEnd(width)} = ${JSON.stringify(variable.value)} from ${variable.source}\n`).join('')}`;
-}
-
 async function run(command: CommandName, options: CliOptions): Promise<void> {
   if (options.rebaseline && command !== 'import')
     throw new Error('--rebaseline applies only to import.');
   if (command === 'status') return status({ options });
   if (command === 'unfinished') return unfinished({ options });
+  if (command === 'state pull') return statePull({ options });
+  if (command === 'state push') return statePush({ options });
+  if (command === 'state mv') return stateMove({ options });
   const specFile = await findSpecFile();
   const config = await loadConfig(specFile, SPEC_COMMANDS);
   const merged = withConfig(options, config, command, COMMANDS[command].options);
@@ -79,13 +78,12 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
   if (command === 'output') {
     return output(options, stateFileFor(specFile, options, workspace));
   }
-  const { spec, variables } = await loadProject(specFile, {
+  const { spec } = await loadProject(specFile, {
     workspace,
     varFiles: options['var-file'] ?? [],
     vars: options.var ?? [],
     env: process.env,
   });
-  if (variables.length) process.stderr.write(variableReport(variables));
   if (command === 'init')
     return init({
       options,
@@ -95,8 +93,10 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
       stateFile: stateFileFor(specFile, options, workspace),
       workspace,
     });
+  if (command === 'state rm')
+    return stateRm({ options, spec, stateFile: stateFileFor(specFile, options, workspace) });
   const ordered = graph(spec);
-  const context = { options, specFile, spec, ordered };
+  const context = { options, specFile, workspace, spec, ordered };
   if (command === 'compile') return compile(context);
   if (command === 'graph') return graphCommand(context);
   if (command === 'impact') return impact(context);
@@ -114,15 +114,22 @@ async function run(command: CommandName, options: CliOptions): Promise<void> {
   return schedule(withChain);
 }
 
+// As in Terraform, state pull, state push, state mv and state rm are two-word commands.
+function commandWords(words: string[]): string[] {
+  return words[0] === 'state' && words[1] && !words[1].startsWith('-')
+    ? [`state ${words[1]}`, ...words.slice(2)]
+    : words;
+}
+
 export async function main(): Promise<void> {
-  const [command, ...args] = process.argv.slice(2);
+  const [command, ...args] = commandWords(process.argv.slice(2));
   if (command === '--version' || command === '-V' || command === 'version') {
     const manifest = JSON.parse(
       await readFile(new URL('../../package.json', import.meta.url), 'utf8'),
     );
     console.log(manifest.version);
   } else if (command === '--help' || command === '-h' || command === 'help') {
-    const topic = command === 'help' ? args[0] : null;
+    const topic = command === 'help' ? commandWords(args)[0] : null;
     if (topic && !isCommand(topic)) {
       console.error(`Unknown command ${topic}.\n${usage()}`);
       process.exitCode = 2;

@@ -1,4 +1,6 @@
-import { isAddress } from 'viem';
+import { modulePath, validateModules } from './modules.ts';
+import { callTarget } from './call-target.ts';
+import { isAddress, getContractAddress } from 'viem';
 import { assertDerivedSalt, assertSaltDerivation } from './salt.ts';
 import type { ContractId, DistributiveOmit, Hash, JsonValue, ResourceId } from '../types.ts';
 import type {
@@ -9,6 +11,7 @@ import type {
   OrderedNode,
   ParsedSpec,
   ResolvedAddresses,
+  SpecCall,
   SpecContract,
   SpecValue,
 } from './types.ts';
@@ -19,7 +22,7 @@ export const DEFAULT_FACTORY: Factory = {
 };
 
 const ID = /^[a-z][a-zA-Z0-9_]*$/;
-const ROLE = /^[a-z][a-z0-9_-]*$/;
+const ROLE = /^[a-z][a-zA-Z0-9_-]*$/;
 const HASH = /^0x[0-9a-fA-F]{64}$/;
 const SECRET_KEY = /^(private[_-]?key|secret[_-]?key|mnemonic|seed[_-]?phrase|passphrase)$/i;
 
@@ -207,8 +210,29 @@ function validateReferences(spec: ParsedSpec): void {
   for (const [name, item] of Object.entries(spec.externals))
     candidates.push([`external:${name}`, [item.checks]]);
   for (const item of spec.calls)
-    candidates.push([`call:${item.id}`, [item.args, item.check, item.before]]);
+    candidates.push([
+      `call:${item.id}`,
+      [item.args, item.check, item.before, item.additionalChecks],
+    ]);
 
+  const resourceIds = new Set([
+    ...spec.contracts.map((item) => `contract:${item.id}`),
+    ...spec.calls.map((item) => `call:${item.id}`),
+    ...Object.keys(spec.externals).map((name) => `external:${name}`),
+  ]);
+  for (const instance of spec.modules?.instances ?? []) {
+    for (const names of Object.values(instance.resources))
+      for (const id of Object.values(names))
+        assert(
+          resourceIds.has(id),
+          `Module ${modulePath(instance.path)} maps missing resource ${id}.`,
+        );
+    for (const binding of [...Object.values(instance.inputs), ...Object.values(instance.outputs)]) {
+      candidates.push([`module:${modulePath(instance.path)}`, [binding.value]]);
+      for (const id of binding.after)
+        assert(resourceIds.has(id), `Module readiness names missing resource ${id}.`);
+    }
+  }
   for (const [owner, values] of candidates) {
     for (const { reference, requiresLive } of referenceDetails(values, owner)) {
       const parts = reference.split('.');
@@ -227,11 +251,19 @@ function validateReferences(spec: ParsedSpec): void {
         );
         assert(externalIds.has(name), `Missing graph node external:${name} for ${owner}.`);
       } else if (root === 'contracts') {
+        const created = parts.length === 4 && parts[2] === 'created';
         assert(
-          parts.length === 3 && parts[2] === 'address' && name !== undefined,
+          ((parts.length === 3 && parts[2] === 'address') || created) && name !== undefined,
           `${owner} has invalid reference ${reference}.`,
         );
         assert(contractIds.has(name), `Missing graph node contract:${name} for ${owner}.`);
+        if (created)
+          assert(
+            spec.contracts
+              .find((item) => item.id === name)
+              ?.createdCode?.some((item) => item.getter === parts[3]),
+            `${owner} references undeclared pinned created result ${reference}.`,
+          );
       } else {
         throw new Error(`${owner} has unknown reference ${reference}.`);
       }
@@ -239,23 +271,32 @@ function validateReferences(spec: ParsedSpec): void {
   }
 }
 
-function creationReferences(item: SpecContract): (ReferenceDetail & { text: string })[] {
+function executionReferences(
+  item: SpecContract | SpecCall,
+): (ReferenceDetail & { text: string })[] {
   return [
     ...referenceDetails(item.args, 'args').map((detail) => ({
       ...detail,
-      text: 'constructor references',
+      text: 'target' in item ? 'call argument references' : 'constructor references',
     })),
-    ...referenceDetails(item.libraries, 'libraries').map((detail) => ({
-      ...detail,
-      text: 'links library',
-    })),
+    ...referenceDetails('target' in item ? undefined : item.libraries, 'libraries').map(
+      (detail) => ({
+        ...detail,
+        text: 'links library',
+      }),
+    ),
   ].filter(({ reference }) => reference.startsWith('contracts.'));
 }
 
-function validateAssumptions(contracts: SpecContract[], assumptions: unknown[]): void {
-  const byId = new Map(
-    contracts.map((item): [string, SpecContract] => [`contract:${item.id}`, item]),
-  );
+function validateAssumptions(
+  contracts: SpecContract[],
+  calls: SpecCall[],
+  assumptions: unknown[],
+): void {
+  const byId = new Map<string, SpecContract | SpecCall>([
+    ...contracts.map((item): [string, SpecContract] => [`contract:${item.id}`, item]),
+    ...calls.map((item): [string, SpecCall] => [`call:${item.id}`, item]),
+  ]);
   const seen = new Set<string>();
   for (const assumption of assumptions) {
     assert(isObject(assumption), 'Spec executionAssumptions must contain objects.');
@@ -273,11 +314,11 @@ function validateAssumptions(contracts: SpecContract[], assumptions: unknown[]):
     assert(
       typeof assumption.location === 'string' &&
         typeof assumption.reference === 'string' &&
-        creationReferences(consumer).some(
+        executionReferences(consumer).some(
           (detail) =>
             detail.location === assumption.location && detail.reference === assumption.reference,
         ),
-      `Execution assumption for ${assumption.consumer} must identify a real constructor or library reference and location.`,
+      `Execution assumption for ${assumption.consumer} must identify a real ${'target' in consumer ? 'call argument' : 'constructor or library'} reference and location.`,
     );
     assert(
       typeof assumption.reason === 'string' && assumption.reason.trim().length > 0,
@@ -300,6 +341,7 @@ export function parseSpec(raw: unknown): ParsedSpec {
     spec,
     new Set([
       'schema',
+      'modules',
       'chainId',
       'values',
       'externals',
@@ -311,6 +353,7 @@ export function parseSpec(raw: unknown): ParsedSpec {
     ]),
     'Spec',
   );
+  if (spec.modules !== undefined) validateModules(spec.modules);
   assert(spec.schema === 1 || spec.schema === 2, 'Spec must have schema: 1 or 2.');
   assert(
     spec.dependencyMode === undefined ||
@@ -325,16 +368,18 @@ export function parseSpec(raw: unknown): ParsedSpec {
     typeof spec.chainId === 'number' && Number.isSafeInteger(spec.chainId) && spec.chainId > 0,
     'Spec needs a positive numeric chainId.',
   );
-  assert(
-    Array.isArray(spec.contracts) && spec.contracts.length > 0,
-    'Spec needs a nonempty contracts array.',
-  );
+  assert(Array.isArray(spec.contracts), 'Spec needs a contracts array.');
   spec.values ??= {};
   spec.externals ??= {};
   spec.calls ??= [];
   assert(isObject(spec.values), 'Spec values must be an object.');
   assert(isObject(spec.externals), 'Spec externals must be an object.');
   assert(Array.isArray(spec.calls), 'Spec calls must be an array.');
+  assert(
+    spec.contracts.length + spec.calls.length + Object.keys(spec.externals).length > 0 ||
+      (isObject(spec.modules) && spec.modules.version === 2),
+    'Spec needs at least one resource.',
+  );
 
   for (const name of Object.keys(spec.values)) assertId(name, `Value name ${name}`);
   for (const [name, external] of Object.entries(spec.externals)) {
@@ -369,6 +414,7 @@ export function parseSpec(raw: unknown): ParsedSpec {
         'checks',
         'after',
         'codeHash',
+        'createdBy',
         'creationProofMode',
         'createdCode',
         'signerRole',
@@ -418,6 +464,16 @@ export function parseSpec(raw: unknown): ParsedSpec {
     if (item.checks !== undefined) assertChecks(item.checks, `${fullId} checks`);
     if (item.after !== undefined) assertAfter(item.after, `${fullId} after`);
     if (item.codeHash !== undefined) assertHash(item.codeHash, `${fullId} codeHash`);
+    if (item.createdBy !== undefined) {
+      assert(
+        typeof item.createdBy === 'string' && /^call:[a-z][a-zA-Z0-9_]*$/.test(item.createdBy),
+        `${fullId} createdBy must name a call.`,
+      );
+      assert(
+        item.address !== undefined && item.codeHash !== undefined,
+        `${fullId} createdBy requires an address and codeHash.`,
+      );
+    }
     assert(
       item.creationProofMode === undefined || item.creationProofMode === 'pinned-runtime',
       `${fullId} creationProofMode must be pinned-runtime.`,
@@ -492,10 +548,12 @@ export function parseSpec(raw: unknown): ParsedSpec {
       new Set([
         'id',
         'target',
+        'abi',
         'method',
         'args',
         'check',
         'before',
+        'additionalChecks',
         'after',
         'signerRole',
         'ownerOnly',
@@ -507,25 +565,71 @@ export function parseSpec(raw: unknown): ParsedSpec {
     const fullId = `call:${item.id}`;
     assert(!ids.has(fullId), `Duplicate ${fullId}.`);
     ids.add(fullId);
-    assert(
-      typeof item.target === 'string' && ID.test(item.target),
-      `${fullId} needs a valid target contract ID.`,
-    );
+    assert(typeof item.target === 'string', `${fullId} needs a call target.`);
+    const target = callTarget(item.target);
+    if (target.getter) {
+      const parent = (spec.contracts as unknown as SpecContract[]).find(
+        (contract) => contract.id === target.name,
+      );
+      assert(
+        parent?.createdCode?.some((child) => child.getter === target.getter),
+        `${fullId} names an undeclared created getter ${item.target}.`,
+      );
+      assert(Array.isArray(item.abi), `${fullId} needs the created child's ABI.`);
+    }
+    if (item.abi !== undefined) assert(Array.isArray(item.abi), `${fullId} abi must be an array.`);
     assert(typeof item.method === 'string' && item.method.length > 0, `${fullId} needs a method.`);
     assert(Array.isArray(item.args), `${fullId} needs args.`);
-    assert(isObject(item.check), `${fullId} needs a check predicate.`);
-    assertKeys(item.check, new Set(['function', 'args', 'equals']), `${fullId} check`);
-    assert(
-      typeof item.check.function === 'string' &&
-        item.check.function.length > 0 &&
-        Object.hasOwn(item.check, 'equals'),
-      `${fullId} needs check.function and check.equals.`,
-    );
-    item.check.args ??= [];
-    assert(Array.isArray(item.check.args), `${fullId} check.args must be an array.`);
-    assert(isObject(item.before), `${fullId} needs a before predicate.`);
-    assertKeys(item.before, new Set(['equals']), `${fullId} before`);
-    assert(Object.hasOwn(item.before, 'equals'), `${fullId} needs before.equals.`);
+    if (item.additionalChecks !== undefined) {
+      assert(
+        Array.isArray(item.additionalChecks) && item.additionalChecks.length > 0,
+        `${fullId} additionalChecks must be a nonempty array.`,
+      );
+      for (const binding of item.additionalChecks) {
+        assert(isObject(binding), `${fullId} additional check must be an object.`);
+        assertKeys(binding, new Set(['check', 'before']), `${fullId} additional check`);
+      }
+    }
+    for (const binding of [item, ...(item.additionalChecks ?? [])]) {
+      assert(isObject(binding), `${fullId} check must be an object.`);
+      const { check, before } = binding;
+      assert(isObject(check), `${fullId} needs a check predicate.`);
+      assertKeys(
+        check,
+        new Set(['function', 'args', 'equals', 'address', 'revert']),
+        `${fullId} check`,
+      );
+      assert(
+        typeof check.function === 'string' &&
+          check.function.length > 0 &&
+          Object.hasOwn(check, 'equals') !== Object.hasOwn(check, 'revert'),
+        `${fullId} needs check.function and check.equals.`,
+      );
+      check.args ??= [];
+      assert(Array.isArray(check.args), `${fullId} check.args must be an array.`);
+      assert(isObject(before), `${fullId} needs a before predicate.`);
+      assertKeys(before, new Set(['equals', 'absent', 'revert']), `${fullId} before`);
+      assert(
+        ['equals', 'absent', 'revert'].filter((key) => Object.hasOwn(before, key)).length === 1,
+        `${fullId} needs before.equals or before.absent.`,
+      );
+      if (Object.hasOwn(before, 'absent'))
+        assert(
+          before.absent === true && Object.hasOwn(check, 'address'),
+          `${fullId} before.absent needs a check address.`,
+        );
+      for (const expected of [check.revert, before.revert]) {
+        if (expected === undefined) continue;
+        assert(isObject(expected), `${fullId} revert must be an object.`);
+        assertKeys(expected, new Set(['error', 'args']), `${fullId} revert`);
+        assert(
+          typeof expected.error === 'string' && expected.error.length > 0,
+          `${fullId} revert needs an error name.`,
+        );
+        expected.args ??= [];
+        assert(Array.isArray(expected.args), `${fullId} revert.args must be an array.`);
+      }
+    }
     if (item.after !== undefined) assertAfter(item.after, `${fullId} after`);
     if (item.signerRole !== undefined)
       assert(
@@ -541,7 +645,10 @@ export function parseSpec(raw: unknown): ParsedSpec {
       );
   }
 
-  if (spec.contracts.some((item) => isObject(item) && item.salt !== undefined)) {
+  if (
+    spec.contracts.some((item) => isObject(item) && item.salt !== undefined) ||
+    (isObject(spec.modules) && spec.modules.version === 2 && spec.factory !== undefined)
+  ) {
     spec.factory ??= cloneJson(DEFAULT_FACTORY);
     assert(isObject(spec.factory), 'Factory must be an object.');
     assertKeys(spec.factory, new Set(['address', 'codeHash']), 'Factory');
@@ -565,7 +672,7 @@ export function parseSpec(raw: unknown): ParsedSpec {
   // The checks above are the runtime half of ParsedSpec; the reference and assumption checks need the typed shape.
   const parsed = spec as unknown as ParsedSpec;
   validateReferences(parsed);
-  validateAssumptions(parsed.contracts, parsed.executionAssumptions ?? []);
+  validateAssumptions(parsed.contracts, parsed.calls, parsed.executionAssumptions ?? []);
   return parsed;
 }
 
@@ -645,6 +752,7 @@ export function graph(spec: ParsedSpec): OrderedNode[] {
               ['args', node.item.args],
               ['check', node.item.check],
               ['before', node.item.before],
+              ['additionalChecks', node.item.additionalChecks],
             ];
     for (const [field, value] of fields) {
       for (const { reference, requiresLive, location } of referenceDetails(value, field)) {
@@ -654,16 +762,19 @@ export function graph(spec: ParsedSpec): OrderedNode[] {
         addEdge(resolution, dependency, `${location} needs ${reference}`);
         if (mode === 'compatibility')
           addEdge(execution, dependency, `compatibility reference ${reference}`);
-        else if (requiresLive) addEdge(execution, dependency, `requiresLive ${reference}`);
+        else if (requiresLive || reference.includes('.created.'))
+          addEdge(execution, dependency, `requiresLive ${reference}`);
         else if (root === 'externals' && node.kind !== 'external')
           addEdge(execution, dependency, `external verification ${reference}`);
       }
     }
     if (node.kind === 'call') {
-      const target: ContractId = `contract:${node.item.target}`;
+      const target = callTarget(node.item.target).id;
       addEdge(resolution, target, 'call target address');
       addEdge(execution, target, 'live call target');
     }
+    if (node.kind === 'contract' && node.item.createdBy)
+      addEdge(execution, node.item.createdBy, 'checked creator result');
     const after = node.kind === 'external' ? undefined : node.item.after;
     for (const dependency of after ?? []) addEdge(execution, dependency, 'explicit after');
     if (
@@ -726,9 +837,9 @@ export function dependencyWarnings(spec: ParsedSpec, ordered: OrderedNode[]): st
   const assumptions = spec.executionAssumptions ?? [];
   const warnings: string[] = [];
   for (const node of ordered) {
-    if (node.kind !== 'contract') continue;
-    // Creation code can call a constructor argument or a linked library, so both need an edge or an assumption.
-    for (const { reference, location, text } of creationReferences(node.item)) {
+    if (node.kind === 'external') continue;
+    // Constructors and methods can read referenced contracts; each use needs an edge or an assumption.
+    for (const { reference, location, text } of executionReferences(node.item)) {
       const name = reference.split('.')[1];
       const dependency: ContractId = `contract:${name}`;
       if (
@@ -741,7 +852,7 @@ export function dependencyWarnings(spec: ParsedSpec, ordered: OrderedNode[]): st
         )
       ) {
         warnings.push(
-          `${node.id} ${text} ${reference} without an execution dependency; confirm its constructor does not call the referenced contract.`,
+          `${node.id} ${text} ${reference} without an execution dependency; confirm its ${node.kind === 'call' ? 'method' : 'constructor'} does not call the referenced contract.`,
         );
       }
     }
@@ -759,7 +870,7 @@ export function impact(spec: ParsedSpec, ordered: OrderedNode[], reference: stri
         ? [node.item.address, node.item.args, node.item.libraries, node.item.checks]
         : node.kind === 'external'
           ? [node.item.checks]
-          : [node.item.args, node.item.check, node.item.before];
+          : [node.item.args, node.item.check, node.item.before, node.item.additionalChecks];
     if (
       references(inputs).has(reference) ||
       node.resolutionDependencies.some((dependency) => affected.has(dependency))
@@ -793,7 +904,7 @@ export function resolve(
           (value.requiresLive === undefined || typeof value.requiresLive === 'boolean'),
         'A reference object needs ref and optional boolean requiresLive.',
       );
-      const [root, name, field] = value.ref.split('.');
+      const [root, name, field, getter] = value.ref.split('.');
       if (root === 'values' && field === undefined) {
         assert(name !== undefined && Object.hasOwn(spec.values, name), `Missing value ${name}.`);
         return cloneJson(spec.values[name]);
@@ -802,6 +913,14 @@ export function resolve(
         const external = name === undefined ? undefined : spec.externals[name];
         assert(external, `Missing external ${name}.`);
         return external.address;
+      }
+      if (root === 'contracts' && field === 'created') {
+        const parent = name === undefined ? undefined : addresses[name];
+        const child = spec.contracts
+          .find((item) => item.id === name)
+          ?.createdCode?.find((item) => item.getter === getter);
+        assert(parent && child, `Missing pinned created result ${value.ref}.`);
+        return getContractAddress({ from: parent, nonce: BigInt(child.createNonce) }).toLowerCase();
       }
       if (root === 'contracts' && field === 'address') {
         const address = name === undefined ? undefined : addresses[name];

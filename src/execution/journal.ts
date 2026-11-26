@@ -378,7 +378,8 @@ export function liveTransactions(records: JournalRecord[]): LiveTransaction[] {
   for (const list of groups.values()) {
     const latest = latestRecord(list);
     const tx = currentTransaction(list);
-    if (!latest || !tx) continue;
+    // A moved record is evidence of a transaction of another scope. It is never live in this one.
+    if (!latest || !tx || latest.phase === 'moved') continue;
     if (
       LIVE_PHASES.has(latest.phase) ||
       (latest.phase === 'intent' && latest.replacement) ||

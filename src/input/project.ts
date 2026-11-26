@@ -2,16 +2,11 @@ import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { parseSpec } from '../spec/index.ts';
 import { compileConfig, compileProject, configOptions } from './compile.ts';
-import { fail, parseHcl } from './hcl.ts';
+import { compileModules, readSource } from './modules.ts';
+import { parseHcl } from './hcl.ts';
 import type { CompiledProject } from './compile.ts';
 import type { ParsedSpec } from '../spec/types.ts';
-import type {
-  CommandOptions,
-  CompiledSpec,
-  ConfigOptions,
-  HclDocument,
-  LoadedConfig,
-} from './types.ts';
+import type { CommandOptions, CompiledSpec, ConfigOptions, LoadedConfig } from './types.ts';
 import type { VariableFile, VariableValue } from './variables.ts';
 
 export const DEFAULT_WORKSPACE = 'default';
@@ -100,37 +95,14 @@ export async function compileProjectFile(
     varsFile,
     sibling(specFile, `.${inputs.workspace ?? DEFAULT_WORKSPACE}.ethpvars`),
   ];
-  const directory = path.dirname(specFile);
-  const ethpFiles =
-    path.basename(specFile) === 'main.ethp'
-      ? (await readdir(directory, { withFileTypes: true }))
-          .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && isEthp(entry.name))
-          .map((entry) => path.join(directory, entry.name))
-          .sort()
-      : [specFile];
-  const [sources, texts] = await Promise.all([
-    Promise.all(ethpFiles.map((file) => readFile(file, 'utf8'))),
+  specFile = path.resolve(specFile);
+  const [document, texts] = await Promise.all([
+    readSource(specFile),
     Promise.all([
       ...optional.map(readOptional),
       ...(inputs.varFiles ?? []).map((file) => readFile(path.resolve(file), 'utf8')),
     ]),
   ]);
-  const documents = sources.map((source, index) => parseHcl(display(ethpFiles[index]!), source));
-  const main = documents.find((document) => document.at.file === display(specFile));
-  if (!main) throw new Error(`No main.ethp in ${directory}.`);
-  const document: HclDocument = { kind: 'body', at: main.at, attributes: new Map(), blocks: [] };
-  for (const part of documents) {
-    for (const [name, attribute] of part.attributes) {
-      const first = document.attributes.get(name);
-      if (first)
-        fail(
-          attribute,
-          `${name} is already set at ${first.at.file}:${first.at.line}:${first.at.column}.`,
-        );
-      document.attributes.set(name, attribute);
-    }
-    document.blocks.push(...part.blocks);
-  }
   const files: VariableFile[] = [
     ...optional,
     ...(inputs.varFiles ?? []).map((file) => path.resolve(file)),
@@ -139,7 +111,10 @@ export async function compileProjectFile(
       ? []
       : [{ file: display(file), document: parseHcl(display(file), texts[index]) }],
   );
-  return compileProject(document, {
+  const compile = document.blocks.some((block) => block.type === 'module')
+    ? (values: Parameters<typeof compileProject>[1]) => compileModules(specFile, document, values!)
+    : (values: Parameters<typeof compileProject>[1]) => compileProject(document, values);
+  return compile({
     files,
     env: inputs.env ?? {},
     vars: inputs.vars ?? [],

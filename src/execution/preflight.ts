@@ -1,5 +1,5 @@
 import { concatHex, keccak256 } from 'viem';
-import { canonicalJson, hashJson } from '../identity.ts';
+import { canonicalJson, hashJson, jsonSafe } from '../identity.ts';
 import { encodeMethod } from '../validation/index.ts';
 import { ApplyError } from './errors.ts';
 import {
@@ -30,18 +30,18 @@ import type {
   ContractId,
   Hash,
   Hex,
-  JsonSafe,
   ResourceId,
 } from '../types.ts';
 import type { PlanIdentityInput, PreparedAction } from './types.ts';
 
-const APPLICABLE = new Set(['reuse', 'deploy', 'call']);
+const APPLICABLE = new Set(['reuse', 'verify', 'deploy', 'call']);
 const IDENTITY_FIELDS = [
   'kind',
   'dependencies',
   'resolutionDependencies',
   'executionEdges',
   'address',
+  'createdBy',
   'artifactHash',
   'initcodeHash',
   'inputsHash',
@@ -62,29 +62,12 @@ const IDENTITY_FIELDS = [
   'check',
   'before',
   'after',
+  'additionalChecks',
   'ownerOnly',
   'transfersOwnership',
 ];
 
-function convert(value: unknown): unknown {
-  if (typeof value === 'bigint') return value.toString();
-  if (typeof value === 'string')
-    return /^0x[0-9a-fA-F]*$/.test(value) ? value.toLowerCase() : value;
-  if (Array.isArray(value)) return value.map(convert);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value)
-        .filter(([, item]) => item !== undefined)
-        .map(([key, item]) => [key, convert(item)]),
-    );
-  }
-  return value;
-}
-
-// Makes in-memory values comparable with plan JSON: quantities become decimal strings and hex becomes lowercase.
-export function jsonSafe<T>(value: T): JsonSafe<T> {
-  return convert(value) as JsonSafe<T>;
-}
+export { jsonSafe } from '../identity.ts';
 
 function same(a: unknown, b: unknown): boolean {
   return canonicalJson(jsonSafe(a ?? null)) === canonicalJson(jsonSafe(b ?? null));
@@ -284,6 +267,8 @@ export async function checkPlanIdentity({
   if (spec === undefined || spec === null)
     throw new ApplyError('stale-spec', 'Apply needs the spec that produced the plan.');
   const parsed = deps.parseSpec(structuredClone(spec));
+  if (!same(plan.modules, parsed.modules))
+    throw new ApplyError('stale-spec', 'The module interfaces changed after planning.');
   const specHash = hashJson(parsed);
   if (specHash !== plan.specHash)
     throw new ApplyError('stale-spec', 'The spec changed after the plan was created.', {
@@ -359,6 +344,11 @@ export async function checkPlanIdentity({
           failures.push('transaction payload differs from the planner encoding');
       }
     }
+    if (
+      planned.action === 'verify' &&
+      (fresh.kind !== 'contract' || !fresh.createdBy || fresh.initcode)
+    )
+      failures.push('verification needs a checked creator result');
     if (planned.action === 'call') {
       if (planned.kind !== 'call') failures.push('only a call resource can be called');
       else if (

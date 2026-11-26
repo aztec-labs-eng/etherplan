@@ -56,6 +56,17 @@ export function assertNotSecret(name: string, node: Located): void {
     fail(node, `${name} is a forbidden signer secret. Keep signer keys in the environment.`);
 }
 
+function assertRecordFields(value: JsonValue, node: Located): void {
+  if (Array.isArray(value)) {
+    for (const item of value) assertRecordFields(item, node);
+  } else if (value !== null && typeof value === 'object') {
+    for (const [name, item] of Object.entries(value)) {
+      assertNotSecret(name, node);
+      assertRecordFields(item, node);
+    }
+  }
+}
+
 export function typeName(type: VariableType): string {
   return type.kind === 'list' ? `list(${typeName(type.element)})` : type.kind;
 }
@@ -93,7 +104,18 @@ function parseType(node: HclExpression): VariableType {
 }
 
 // Null is valid for every type, as in Terraform: a variable can default to null and be set only where needed.
-function conforms(value: JsonValue, type: VariableType): boolean {
+function conforms(value: JsonValue, type: VariableType, symbolic = false): boolean {
+  if (
+    symbolic &&
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    typeof value.ref === 'string' &&
+    /^(contracts|externals)\.[a-z][a-zA-Z0-9_]*\.(address|created\.[a-zA-Z_][a-zA-Z0-9_]*)$/.test(
+      value.ref,
+    )
+  )
+    return type.kind === 'address' || type.kind === 'any';
   if (value === null) return true;
   switch (type.kind) {
     case 'any':
@@ -109,7 +131,7 @@ function conforms(value: JsonValue, type: VariableType): boolean {
     case 'bytes32':
       return typeof value === 'string' && BYTES32.test(value);
     case 'list':
-      return Array.isArray(value) && value.every((item) => conforms(item, type.element));
+      return Array.isArray(value) && value.every((item) => conforms(item, type.element, symbolic));
   }
 }
 
@@ -176,6 +198,7 @@ export function declareVariables(blocks: HclBlock[]): Map<string, VariableDeclar
     const declaration: VariableDeclaration = { name, type, block };
     if (fallback) {
       const value = literal(fallback, 'default');
+      assertRecordFields(value, fallback);
       if (!conforms(value, type))
         fail(
           fallback,
@@ -196,7 +219,10 @@ export function declareVariables(blocks: HclBlock[]): Map<string, VariableDeclar
 export function resolveVariables(
   declarations: Map<string, VariableDeclaration>,
   inputs: VariableInputs,
+  bindings?: ReadonlyMap<string, JsonValue>,
 ): Map<string, VariableValue> {
+  for (const name of bindings?.keys() ?? [])
+    if (!declarations.has(name)) throw new Error(`Module input ${name} is not declared.`);
   const fromFiles = new Map<string, VariableValue>();
   for (const file of inputs.files ?? []) {
     const [block] = file.document.blocks;
@@ -215,6 +241,7 @@ export function resolveVariables(
           `${name} is not declared. Add variable "${name}" {} to the .ethp file, or remove it from ${file.file}.`,
         );
       const value = literal(attribute.value, `Variable ${name}`);
+      assertRecordFields(value, attribute.value);
       if (!conforms(value, declaration.type))
         fail(
           attribute.value,
@@ -241,7 +268,15 @@ export function resolveVariables(
     const flag = fromFlags.get(name);
     const environment = inputs.env?.[`ETHP_VAR_${name}`];
     const file = fromFiles.get(name);
-    if (flag !== undefined)
+    if (bindings?.has(name)) {
+      const value = bindings.get(name)!;
+      if (!conforms(value, declaration.type, true))
+        fail(
+          block,
+          `Module input ${name} must be ${expected(declaration.type)}; found ${describeValue(value)}.`,
+        );
+      values.set(name, { name, value, source: 'module input', node: block });
+    } else if (flag !== undefined)
       values.set(name, {
         name,
         value: fromString(flag, declaration, `--var ${name}`),

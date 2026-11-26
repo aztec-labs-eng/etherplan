@@ -96,6 +96,10 @@ export interface RecordResourceInput {
 /** The state file. Disk shape; `validateState` returns a deep JSON copy of it. */
 export interface StateFile {
   formatVersion: 1;
+  /** Persistent complete-root ownership, including configurations that remove all module calls. */
+  moduleRoot?: true;
+  /** Journal length at the last successful module-root state commit. */
+  journalSequence?: number;
   chain: ChainIdentity;
   /** `contract:` records carry every ContractStateResource field; the validator requires them. */
   resources: Record<ContractId, ContractStateResource> & Record<ExternalId | CallId, StateResource>;

@@ -25,15 +25,16 @@ async function rejectingRpc(upstream, method = 'eth_sendRawTransaction') {
     for await (const chunk of req) body += chunk;
     const rpc = JSON.parse(body);
     res.setHeader('content-type', 'application/json');
-    if (rpc.method === method) {
+    // The CLI transport can send the method in a batch. A batch that has it is rejected as a whole.
+    const calls = Array.isArray(rpc) ? rpc : [rpc];
+    if (calls.some((call) => call.method === method)) {
       rejected++;
-      res.end(
-        JSON.stringify({
-          jsonrpc: '2.0',
-          id: rpc.id,
-          error: { code: -32000, message: `Rejected with credential ${sentinel}` },
-        }),
-      );
+      const errors = calls.map((call) => ({
+        jsonrpc: '2.0',
+        id: call.id,
+        error: { code: -32000, message: `Rejected with credential ${sentinel}` },
+      }));
+      res.end(JSON.stringify(Array.isArray(rpc) ? errors : errors[0]));
       return;
     }
     const response = await fetch(upstream, {

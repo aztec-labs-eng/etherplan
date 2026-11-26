@@ -377,7 +377,7 @@ test('state records a derived salt beside its derivation, drops it for an explic
   );
 });
 
-test('a changed mixer or label is a conflict whose saltChange names the old and new derivation', async () => {
+test('a changed mixer, label or explicit salt replaces an unchanged contract, and saltChange names the old and new derivation', async () => {
   const artifacts = new Map([['vault', normalizedArtifact]]);
   const spec = (fields) => ({
     schema: 2,
@@ -415,8 +415,13 @@ test('a changed mixer or label is a conflict whose saltChange names the old and 
   assert.deepEqual(same.resources[0].saltDerivation, { mixer: MIXER });
   assert.equal(same.resources[0].observation.stateComparison.saltChange, undefined);
 
+  const replaces = (planned) => {
+    const [{ action, observation }] = planned.resources;
+    const { replacement, conflict } = observation.stateComparison;
+    assert.deepEqual([action, replacement, conflict], ['deploy', true, false]);
+  };
   const rotated = await plan(derived({ mixer: 'aztec/rollup-v2' }));
-  assert.equal(rotated.resources[0].action, 'conflict');
+  replaces(rotated);
   assert.deepEqual(rotated.resources[0].saltDerivation, { mixer: 'aztec/rollup-v2' });
   assert.deepEqual(rotated.resources[0].observation.stateComparison.saltChange, {
     previousSalt: deriveSalt(MIXER),
@@ -427,14 +432,14 @@ test('a changed mixer or label is a conflict whose saltChange names the old and 
   });
 
   const relabelled = await plan(derived({ mixer: MIXER, label: 'second-instance' }));
-  assert.equal(relabelled.resources[0].action, 'conflict');
+  replaces(relabelled);
   assert.equal(
     relabelled.resources[0].observation.stateComparison.saltChange.reason,
     'The derive label changed from no label to label "second-instance".',
   );
 
   const explicit = await plan({ salt: SALT });
-  assert.equal(explicit.resources[0].action, 'conflict');
+  replaces(explicit);
   assert.equal(explicit.resources[0].saltDerivation, undefined);
   assert.deepEqual(explicit.resources[0].observation.stateComparison.saltChange, {
     previousSalt: deriveSalt(MIXER),
@@ -504,7 +509,7 @@ test('a JSON spec records generation inside saltDerivation, at least 1, matching
   );
 });
 
-test('a raised generation replaces an unchanged contract; a lowered one or a salt change at the same generation conflicts', async () => {
+test('a raised generation or a rotated mixer replaces an unchanged contract; a lowered generation conflicts', async () => {
   const artifacts = new Map([['vault', normalizedArtifact]]);
   const spec = (derivation) => ({
     schema: 2,
@@ -558,8 +563,9 @@ test('a raised generation replaces an unchanged contract; a lowered one or a sal
   );
 
   const rotated = await plan(second, { mixer: 'aztec/rollup-v2', generation: 2 });
-  assert.equal(rotated.resources[0].action, 'conflict');
+  assert.equal(rotated.resources[0].action, 'deploy');
   assert.equal(rotated.resources[0].observation.stateComparison.identityMatches, true);
+  assert.equal(rotated.resources[0].observation.stateComparison.replacement, true);
   assert.equal(
     rotated.resources[0].observation.stateComparison.saltChange.reason,
     'The mixer changed from "aztec/rollup" to "aztec/rollup-v2".',
